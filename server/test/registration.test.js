@@ -66,7 +66,7 @@ test('newly claimed names require fresh grants; restarting discards all identiti
   const aliceOwner = token();
   registry.register(token(), bob);
   const project = {
-    device_id: bob.device_id, project_id: 'app', alias: 'bob/app', allowed_senders: ['alice'],
+    device_id: bob.device_id, project_id: 'app', alias: 'bob/app', allowed_senders: ['@Alice'],
   };
   registry.putTarget('bob', 'T', project);
   const identity = registry.register(aliceOwner, alice);

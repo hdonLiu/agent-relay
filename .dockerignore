@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!protocol.js
+!client
+!client/package.json
+!server
+!server/package.json
+!server/index.js
+!server/http.js
+!server/collaboration
+!server/collaboration/*.js
+!server/registry
+!server/registry/*.js

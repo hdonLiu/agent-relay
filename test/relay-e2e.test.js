@@ -142,7 +142,7 @@ test(
           '--target',
           name + '/app',
           '--allow',
-          other,
+          '@' + other.toUpperCase(),
           '--agent-bin',
           process.execPath,
         ],

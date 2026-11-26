@@ -42,6 +42,25 @@ agent-relay-server serve --host 127.0.0.1 --port 8787
 
 让公网域名（下文用 `relay.example.com`）的 HTTPS 反向代理将请求转发到上述端口，保留 `Authorization`，并允许 `/v1/device-stream` 升级为 WebSocket。也可由服务直接终止 TLS，使用 `--host 0.0.0.0 --port 8443 --tls-cert fullchain.pem --tls-key privkey.pem`，客户端地址随之带上 `:8443`。公网客户端要求有效的 TLS 证书。服务健康检查为 `GET /health`。
 
+## 本机 Docker 和分段测试
+
+在仓库根目录执行以下命令。容器在后台运行，端口只发布到本机。
+
+```sh
+docker build -t agent-relay:local-e2e .
+docker run -d --name agent-relay-local --read-only -p 127.0.0.1:8787:8787 agent-relay:local-e2e
+curl -fsS http://127.0.0.1:8787/health
+```
+
+在装有兼容 Codex 的 macOS 上执行 `npm ci` 后，可以分别运行两项测试。每次启动一个独立的真实 Codex，使用本机固定模型响应来驱动工具；对端脚本通过中继的 HTTP 和 WebSocket 接口收发。测试身份和项目均为临时创建。
+
+```sh
+node scripts/e2e-local.js send
+node scripts/e2e-local.js receive
+```
+
+`send` 验证 Codex 主动发问、答案回到原会话。`receive` 验证指定项目里的新会话能够读取测试文件、回复脚本、在同一会话接收追问，以及为独立事项另建会话。用 `docker stop agent-relay-local` 停止，之后用 `docker start agent-relay-local` 可再次启动；中继重启后需重新登记。
+
 ## 接入 MCP，在 Codex 中注册
 
 在装有客户端的电脑上添加本地 MCP，将示例地址替换为自己的中继服务：

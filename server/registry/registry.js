@@ -134,7 +134,12 @@ export class Registry {
     }
     const fixed = body.fixed_session_ref == null ? null : identifier(body.fixed_session_ref, 'fixed_session_ref');
     if (!Array.isArray(body.allowed_senders) || body.allowed_senders.length > 1000) fail('INVALID_ARGUMENTS');
-    const senders = new Set(body.allowed_senders.map(value => identifier(value, 'allowed sender')));
+    const senders = new Set(body.allowed_senders.map(value => {
+      const name = identifier(value, 'allowed sender').toLowerCase();
+      const handle = name.replace(/^@/, '');
+      // Existing operator-issued identities can have their own case or a literal @.
+      return (this.users.get(name) ?? this.users.get(handle))?.username ?? identifier(handle, 'allowed sender');
+    }));
 
     this.requireDevice({ device_id: device, user_id: owner });
     const existing = this.targets.get(targetId);
