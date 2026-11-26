@@ -15,5 +15,8 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: |
-          npm pack --workspace @agent-relay/server
-          npm pack --workspace @agent-relay/client
+          npm pack --workspace @agent-relay/server --pack-destination "$RUNNER_TEMP"
+          npm pack --workspace @agent-relay/client --pack-destination "$RUNNER_TEMP"
+          npm install --prefix "$RUNNER_TEMP/installed" "$RUNNER_TEMP"/agent-relay-{server,client}-*.tgz
+          "$RUNNER_TEMP/installed/node_modules/.bin/agent-relay" --help
+          "$RUNNER_TEMP/installed/node_modules/.bin/agent-relay-server" --help

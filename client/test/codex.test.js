@@ -21,8 +21,16 @@ test('creates a read-only local thread and can queue its first input before it i
   const calls = [];
   const adapter = new CodexAdapter({ rpc: { async call(method, params) {
     calls.push(method);
+    if (method === 'config/read') return { config: { mcp_servers: { peer: {}, unrelated: {} } } };
     if (method === 'thread/start') {
-      assert.deepEqual(params, { cwd: '/work/app', ephemeral: false, sandbox: 'read-only' });
+      assert.equal(params.cwd, '/work/app');
+      assert.deepEqual(params.runtimeWorkspaceRoots, ['/work/app']);
+      assert.equal(params.ephemeral, false);
+      assert.equal(params.permissions, 'agent-relay-project');
+      assert.deepEqual(params.config['permissions.agent-relay-project.filesystem'], { ':workspace_roots': 'read' });
+      assert.equal(params.config['permissions.agent-relay-project.network.enabled'], false);
+      assert.deepEqual(params.config.mcp_servers, { peer: { required: true }, unrelated: { enabled: false } });
+      assert.equal(params.approvalPolicy, undefined);
       return { thread: { id: 'B1' } };
     }
     assert.equal(params.threadId, 'B1');
@@ -33,7 +41,7 @@ test('creates a read-only local thread and can queue its first input before it i
   } } });
   assert.equal(await adapter.createSession({ cwd: '/work/app' }), 'B1');
   assert.deepEqual(await adapter.deliver('B1', question), { submission_ref: 'Q1' });
-  assert.deepEqual(calls, ['thread/start', 'thread/queue/add']);
+  assert.deepEqual(calls, ['config/read', 'thread/start', 'thread/queue/add']);
 });
 
 test('uses only the original, non-archived thread in the current account and resumes it before queueing', async () => {

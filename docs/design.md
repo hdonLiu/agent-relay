@@ -101,7 +101,7 @@ sequenceDiagram
 1. **运营者发放管理凭据。** 在云端服务器上使用 `agent-relay-server issue-user USER --db PATH` 为甲乙分别创建身份。`issue-user` 与 `serve` 使用同一数据库。对同一身份重新签发会轮换其管理凭据。服务默认监听回环地址，公网域名、证书和持久磁盘由部署者提供。
 2. **每台电脑运行 `agent-relay setup`。** 用户提供 HTTPS 服务地址、自己的管理凭据、本机项目路径和允许提问的账号。MVP 支持从终端输入凭据，也可从 `AGENT_RELAY_USER_TOKEN` 读取。setup 创建有效期十分钟的一次性登记码，立即兑换本设备的 `device_id`、`mcp_token` 和 `device_token`。重复配置同一状态目录时复用已有设备。
 3. **乙发布收件目标。** setup 的 `--adapter` 默认为 `codex`，可用 `--agent-bin` 指定本机可执行文件。目标对应的适配器、项目目录和可选原生线程号保存在本地。云端只登记设备号、项目号、允许的发送者、稳定目标 ID、别名及可选会话引用。默认别名为“所属用户/项目目录名”。带 `/` 的别名必须归该用户。`--allow` 可指定多个发送者，首次未授予联系人时其他人无法向该目标发问。`--session-id` 可将目标明确固定到一个已有原生线程。
-4. **配置宿主和后台。** 默认 setup 用 `codex mcp add` 注册名为 `peer` 的 stdio MCP 服务，安装并启动用户级 `agent-relay daemon`。macOS 使用 LaunchAgent，Linux 使用 systemd 用户服务。`--manual` 仅完成设备及项目登记，MCP 和 daemon 需自行启动。每个状态目录只允许一个活跃 daemon。为无人值守使用，宿主还须能处理该线程，所需工具授权由本机所有者配置。[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+4. **配置宿主和后台。** 默认 setup 用 `codex mcp add` 注册名为 `peer` 的 stdio MCP 服务，安装并启动用户级 `agent-relay daemon`。macOS 使用 LaunchAgent，Linux 使用 systemd 用户服务。`--manual` 仅完成设备及项目登记，MCP 和 daemon 需自行启动。每个状态目录只允许一个活跃 daemon。为无人值守使用，宿主还须能处理该线程，所需工具授权由本机所有者配置。仅使用交互式 CLI 时可先运行 `codex app-server daemon start`，再以 `codex --remote unix://` 接入同一本机共享进程。用 `codex app-server daemon version` 核对 CLI 和运行中的 daemon 版本。[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 
 设备的两种凭据用途分开，服务端只保存摘要。设备被撤销时两种凭据一同失效。客户端默认使用 macOS 钥匙串或 Linux Secret Service。无凭据服务的机器可显式选择 `--credential-store file`，私有状态目录的权限为 `0700`，凭据文件为 `0600`。本机 MCP 入口通过当前用户私有的 `relay.sock` 联系后台，模型只提供业务字段。
 
@@ -115,7 +115,7 @@ sequenceDiagram
 | `GET /v1/conversations` | 管理令牌，列出自己参与的协作。`device_id`、`session_ref` 筛选发起端，`request_id` 可核对自己发送的调用 |
 | `GET /v1/conversations/{id}` | 参与者查询消息编号、类型、顺序、结果类别、交付状态和故障码。视图省略消息正文 |
 
-服务端保存经中转的问题、答案和必要路由，以便离线补送。项目文件、原生线程 ID 和完整聊天历史留在各自电脑。消息文本属于远端输入。Codex 适配器在投递时将其与本地协作指令分隔，并提醒宿主遵守本机权限。新建的接收线程显式带 `sandbox: read-only`。已有线程的工具、外部服务与审批权限仍由本机宿主控制。
+服务端保存经中转的问题、答案和必要路由，以便离线补送。部署者可以读取这些正文。项目文件、原生线程 ID 和完整聊天历史留在各自电脑。消息文本属于远端输入。Codex 适配器在投递时将其与本地协作指令分隔，并提醒宿主遵守本机权限。新建的接收线程使用专用权限配置，只将登记目录设为只读工作区，关闭沙箱网络和 Web 搜索，停用其他已配置的 MCP、应用、插件和多 Agent 功能。明确开放的既有线程沿用所有者原有的宿主权限，投递前校验其目录。
 
 ## 4. MCP 工具与幂等
 
@@ -184,8 +184,8 @@ sequenceDiagram
 
 **Codex 的本机链路。** 适配器启动 `codex app-server proxy`。该进程按字节转发到本机 daemon 的 Unix 控制套接字。适配器在子进程管道上完成 WebSocket Upgrade，并将 JSON-RPC 放入 WebSocket 文本帧。Codex 内这条本地 WebSocket 与连接器到协作云端的 WSS 生命周期独立。`initialize` 时声明 `capabilities.experimentalApi: true`，随后发 `initialized`。[Codex App Server 初始化与线程 API](https://learn.chatgpt.com/docs/app-server) · [本项目代理实现](../client/adapters/codex/proxy.js)
 
-1. 默认首问在本机配置的项目目录执行 `thread/start`，参数包括 `ephemeral: false` 和只读沙箱。尚未写入第一条用户输入的新线程可直接在当前代理连接入队。
-2. 对 A、B1 的后续投递按原生 ID 检查线程是否属于当前账号且可接收直接输入。已卸载的线程用 `thread/resume` 恢复，并核对返回的原 ID。
+1. 默认首问在本机配置的项目目录执行 `thread/start`，使用 `ephemeral: false`、`permissions: agent-relay-project` 和只含登记目录的 `runtimeWorkspaceRoots`。权限配置只在此类受托线程上生效。尚未写入第一条用户输入的新线程可直接在当前代理连接入队。
+2. 对 A、B1 的后续投递按原生 ID 检查线程是否属于当前账号且可接收直接输入。已卸载的线程用 `thread/resume` 恢复，并核对返回的原 ID。恢复自动创建的受托线程时重新应用登记项目的权限配置。
 3. `thread/queue/add` 将 `message_id` 写入 `clientUserMessageId`。返回的 `queuedSubmission.id` 及关联消息号必须有效。连接器只在确认该证据后回执。Codex 负责调度后续 turn，本地连接器不等待模型生成答案。
 4. 崩溃恢复时分页读 `thread/queue/list`、`thread/turns/list`。待处理队列能按 `clientUserMessageId` 核对，已消费用户项能按 `clientId` 核对。两处都查不到时，适配器返回 `unknown`。这些队列能力依赖 Codex 版本和正在运行的本机 daemon。[Codex 队列行为测试（固定版本）](https://github.com/openai/codex/blob/ad9d659a8491fc5169a00dcf7b7e6ca8a87adf69/codex-rs/app-server/tests/suite/v2/thread_queue.rs) · [本项目 Codex 适配器](../client/adapters/codex/index.js)
 
@@ -197,7 +197,8 @@ sequenceDiagram
 | --- | --- | --- |
 | 云端和设备账本 | 自动化测试覆盖离线、多轮、固定目标、批量排队、重放、提前答复、撤权、崩溃后核对 | 公网部署所用持久磁盘、证书、反向代理的 WebSocket 转发 |
 | 端到端传输 | 两套独立设备状态与真实 stdio MCP、HTTPS、WSS、SQLite 在同一测试机往返，宿主用测试替身，问题和回信到达预期会话 | 两台不同网络的电脑、不同账号、睡眠后唤醒和用户登录后的自启 |
-| Codex 原生队列 | 已在隔离环境对 Codex CLI `0.171.0-alpha.13.2` 运行本机代理与队列检查。测试模型处理同一原生线程的两轮输入，队列与历史可核对 | 使用实际账号与桌面前端，观察新输入唤醒原会话、权限审批以及 Agent 引用对方答案完成原任务 |
+| Codex 原生队列 | 已在隔离环境对 Codex CLI `0.171.0-alpha.13.2` 运行本机代理与队列检查。本地固定模型响应触发真实 stdio MCP 答复，宿主提供线程号和调用号。同一原生线程的两轮输入可从队列和历史核对 | 使用实际账号与桌面前端，观察新输入唤醒原会话、权限审批以及 Agent 引用对方答案完成原任务 |
+| 两个真实 Codex 进程 | 两套隔离的本机用户目录和 Codex app-server，经实际 stdio MCP、HTTPS、WSS 完成四次投递。固定模型响应驱动 B1 返回 `needs_info`、A 补充、B1 作答、A 继续原任务。四个消息号均在对应原生线程历史中核对，B 端只创建一个线程 | 两台公网设备、实际用户账号、真实模型自主决定何时发问和回复 |
 | 第二种宿主 | 通用适配契约和测试替身可独立运行 | 实现并验收 Claude Code 等新适配器，之后才开放该目标 |
 
-**双机验收用例。** 两人在不同网络运行连接器，乙建立含已知兼容版本的测试项目，并将该目标开放给甲。甲在 A 首问，乙在 B1 反问，甲补材料后收到最终答复。验收以 A 利用答复完成一个可观察动作、同一事项始终只有 B1 为准。再让乙断开后连发首问与追问、让甲断开后收答复、给同一目标另开协作，分别核对补送顺序、原会话及新 B2。最后撤销甲的目标授权，验证积压消息停止投递且已有会话查得到状态。[端到端测试](../test/relay-e2e.test.js) · [云端领域测试](../server/test/store.test.js) · [Codex 适配器测试](../client/test/codex.test.js)
+**双机验收用例。** 两人在不同网络运行连接器，乙建立含已知兼容版本的测试项目，并将该目标开放给甲。甲在 A 首问，乙在 B1 反问，甲补材料后收到最终答复。验收以 A 利用答复完成一个可观察动作、同一事项始终只有 B1 为准。再让乙断开后连发首问与追问、让甲断开后收答复、给同一目标另开协作，分别核对补送顺序、原会话及新 B2。最后撤销甲的目标授权，验证积压消息停止投递且已有会话查得到状态。[端到端测试](../test/relay-e2e.test.js) · [云端领域测试](../server/test/store.test.js) · [Codex 适配器测试](../client/test/codex.test.js) · [macOS 真实 Codex 检查脚本](../scripts/smoke-codex.js)

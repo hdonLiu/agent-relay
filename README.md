@@ -28,6 +28,8 @@ npm pack --workspace @agent-relay/server
 npm pack --workspace @agent-relay/client
 ```
 
+macOS 上可额外运行 `node scripts/smoke-codex.js`，用已安装的 Codex、临时会话和本地模型响应检验原生入队、MCP 回信和同会话续聊。
+
 把生成的包分发到对应机器。在云服务器上执行 `npm install -g ./agent-relay-server-0.1.0.tgz`，在甲乙各自的电脑上执行 `npm install -g ./agent-relay-client-0.1.0.tgz`。
 
 ## 启动云端
@@ -44,7 +46,7 @@ agent-relay-server serve --db ./data/relay.sqlite --host 127.0.0.1 --port 8787
 
 ## 在两台电脑上登记项目
 
-本地支持 macOS 和 Linux。Codex 需已登录，且其本机 app-server 支持代理连接、会话队列及 MCP 调用上下文。已对照的版本是 `0.171.0-alpha.13.2`。先在每台电脑上确认本地 Codex 能正常工作。仅使用 CLI 时，可用 `codex app-server daemon start` 启动本机共享进程，用 `codex app-server daemon version` 查看运行版本；希望将交互式 CLI 会话加入同一个共享进程时，使用 `codex --remote unix://`。
+本地支持 macOS 和 Linux。Codex 需已登录，且其本机 app-server 支持代理连接、会话队列及 MCP 调用上下文。已对照的版本是 `0.171.0-alpha.13.2`。先在每台电脑上确认本地 Codex 能正常工作。仅使用 CLI 时，可用 `codex app-server daemon start` 启动本机共享进程，用 `codex app-server daemon version` 查看运行版本。希望将交互式 CLI 会话加入同一个共享进程时，使用 `codex --remote unix://`。
 
 甲执行以下命令，按提示输入 alice 的管理凭据。将目录换成甲自己的工程目录。
 
@@ -72,7 +74,8 @@ approval_mode = "approve"
 approval_mode = "approve"
 ```
 
-- **选择已有会话**　乙可为一个单独的别名添加 `--session-id <本机线程 ID>`，显式将获准的首问送进这个旧会话。
+- **首问的项目权限**　自动创建的会话使用专用的只读工作区，以登记目录为根，关闭沙箱网络和其他已配置的 MCP。回信通过 `peer` 工具送出。
+- **选择已有会话**　乙可为一个单独的别名添加 `--session-id <本机线程 ID>`，显式将获准的首问送进这个旧会话。客户端会核对该线程属于当前账号和登记目录。已有会话沿用所有者的工具和审批权限。
 - **调整联系人**　对同一个目录和别名再次运行 setup，使用一个或多个 `--allow` 指定完整名单。`--allow ''` 清空该目标的联系人。
 - **手动运行**　`setup --manual` 只登记设备和目标。随后运行 `codex mcp add peer -- agent-relay mcp`，并在本机运行 `agent-relay daemon`。使用自定义状态目录时，这三个入口都要传入相同的 `--state-dir`。无系统凭据库的主机可显式选用 `--credential-store file`，凭据保存在当前用户的私有状态目录。
 - **重新登记设备**　设备凭据丢失或被撤销时，使用新状态目录重新登记项目及联系人。旧协作绑定原设备，需要重新发起。

@@ -59,13 +59,35 @@ export class CodexAdapter {
 
   identifyCall(meta) { return identifyCall(meta); }
 
+  async #projectPermissions(cwd) {
+    const { config } = await this.rpc.call('config/read', { cwd, includeLayers: false });
+    if (!config?.mcp_servers?.peer || config.mcp_servers.peer.enabled === false) {
+      throw hostError('PEER_MCP_UNAVAILABLE', 'The receiving project must enable its peer MCP server.', 'not_submitted', true);
+    }
+    const otherServers = Object.keys(config.mcp_servers).filter(name => name !== 'peer');
+    return {
+      permissions: 'agent-relay-project', runtimeWorkspaceRoots: [cwd],
+      config: {
+        default_permissions: 'agent-relay-project',
+        'permissions.agent-relay-project.filesystem': { ':workspace_roots': 'read' },
+        'permissions.agent-relay-project.network.enabled': false,
+        mcp_servers: { peer: { required: true }, ...Object.fromEntries(otherServers.map(name => [name, { enabled: false }])) },
+        'features.apps': false, 'features.plugins': false, 'features.multi_agent': false,
+        web_search: 'disabled',
+      },
+    };
+  }
+
   async createSession(target) {
     if (!isAbsolute(target?.cwd ?? '')) {
       throw hostError('TARGET_UNAVAILABLE', 'Target requires a local absolute project path.', 'not_submitted');
     }
-    const response = await this.rpc.call('thread/start', {
-      cwd: target.cwd, ephemeral: false, sandbox: 'read-only',
-    });
+    let policy;
+    try { policy = await this.#projectPermissions(target.cwd); } catch (error) {
+      error.submission = 'not_submitted';
+      throw error;
+    }
+    const response = await this.rpc.call('thread/start', { cwd: target.cwd, ephemeral: false, ...policy });
     const id = response?.thread?.id;
     if (!identifier(id)) {
       throw hostError('DELIVERY_UNCERTAIN', 'The created Codex thread could not be identified.');
@@ -97,7 +119,9 @@ export class CodexAdapter {
         }
       }
       if (thread.status?.type === 'notLoaded') {
-        const resumed = await this.rpc.call('thread/resume', { threadId: nativeId, excludeTurns: true });
+        const policy = localTarget?.cwd && !localTarget.native_session_id
+          ? await this.#projectPermissions(localTarget.cwd) : {};
+        const resumed = await this.rpc.call('thread/resume', { threadId: nativeId, excludeTurns: true, ...policy });
         if (resumed?.thread?.id !== nativeId || resumed.thread.canAcceptDirectInput === false) {
           throw hostError('THREAD_UNAVAILABLE', 'The original Codex thread could not be resumed.', 'not_submitted');
         }
