@@ -1,99 +1,138 @@
 # Agent Relay
 
-在自己的 Codex 会话里问同事的 Agent，让回答回到原会话。首问在同事授权的项目里新建会话，追问带上同一个 `conversation_id` 即可继续。双方在线时可以按用户名找到获准的项目。设备断线就停止投递，恢复在线后可以主动续问。
+**简体中文** | [English](README.en.md)
 
-```mermaid
-flowchart LR
-  A["甲 · 原 Codex 会话 A"] <-->|"stdio MCP 发问 / 本机队列收回答"| CA["甲的本地客户端"]
-  CA -->|"HTTPS · ask_peer"| S["单进程云端 · 内存目录和在线路由"]
-  S -->|"乙主动建立的 WSS · 投问题"| CB["乙的本地客户端"]
-  CB <-->|"本机队列收问题 / stdio MCP 答复"| B["乙 · 项目会话 B1"]
-  CB -->|"HTTPS · reply_to_peer"| S
-  S -->|"甲主动建立的 WSS · 投回答"| CA
-```
+在自己的 Codex 会话里向同事的 Codex 提问，让答案回到你正在处理的任务。
 
-同一仓库构建两个安装包。运营方部署 `server/`，每位用户安装 `client/`。本地客户端包含 MCP 工具入口、后台连接器和宿主适配器。已实现 Codex，其他宿主可从适配器接入。[详细设计、协议和完整时序](docs/design.md)
+> “问一下 @bob，他的 `isho-service` 项目还支持哪些旧版 API？”
 
-## 构建安装包
+Bob 的 Codex 在他指定的 `isho-service` 项目里新建会话，查看代码并回信。你接着问“那 Android 也一样吗？”，问题会回到刚才那条会话。换个话题重新发问时，Bob 的项目里会新建另一条会话。
 
-使用 Node.js 24.5 或更高版本、npm 和 Git。测试还需要 OpenSSL。Linux 客户端使用 util-linux 提供的 `flock`，macOS 使用系统自带的 `lockf`。
+两台电脑可以在不同网络。Codex 通过 MCP 调用本地客户端，客户端主动连到同一个自托管中继。项目所有者决定谁可以提问、在哪个目录接收。双方设备和连接器在线、Codex 已获工具授权时，人可以离开聊天窗口。
+
+## 本机 Docker 和分段测试
+
+**只有一台 Mac 也能试。** 准备 Git、Docker、Node.js 24.5 或更高版本、npm 和兼容的 Codex CLI（已验证 `0.171.0-alpha.13.2`）。克隆仓库并启动中继，端口只对本机开放。
 
 ```sh
 git clone https://github.com/hdonLiu/agent-relay.git
 cd agent-relay
-npm ci
-npm test
-npm run build
-npm pack --workspace @agent-relay/server
-npm pack --workspace @agent-relay/client
-```
-
-macOS 上可额外运行 `node scripts/smoke-codex.js`，用已安装的 Codex、临时会话和本地模型响应检验原生入队、MCP 回信和同会话续聊。
-
-把生成的包分发到对应机器。在云服务器上执行 `npm install -g ./agent-relay-server-0.1.0.tgz`，在甲乙各自的电脑上执行 `npm install -g ./agent-relay-client-0.1.0.tgz`。
-
-## 启动云端
-
-一期只部署一个 Node.js 进程，注册、授权、在线连接和协作路由都在内存中。启动时无需配置数据库、消息代理或数据卷。
-
-```sh
-agent-relay-server serve --host 127.0.0.1 --port 8787
-```
-
-让公网域名（下文用 `relay.example.com`）的 HTTPS 反向代理将请求转发到上述端口，保留 `Authorization`，并允许 `/v1/device-stream` 升级为 WebSocket。也可由服务直接终止 TLS，使用 `--host 0.0.0.0 --port 8443 --tls-cert fullchain.pem --tls-key privkey.pem`，客户端地址随之带上 `:8443`。公网客户端要求有效的 TLS 证书。服务健康检查为 `GET /health`。
-
-## 本机 Docker 和分段测试
-
-在仓库根目录执行以下命令。容器在后台运行，端口只发布到本机。
-
-```sh
 docker build -t agent-relay:local-e2e .
 docker run -d --name agent-relay-local --read-only -p 127.0.0.1:8787:8787 agent-relay:local-e2e
-curl -fsS http://127.0.0.1:8787/health
+curl --retry 8 --retry-all-errors --retry-delay 1 -fsS http://127.0.0.1:8787/health
 ```
 
-在装有兼容 Codex 的 macOS 上执行 `npm ci` 后，可以分别运行两项测试。每次启动一个独立的真实 Codex，使用本机固定模型响应来驱动工具；对端脚本通过中继的 HTTP 和 WebSocket 接口收发。测试身份和项目均为临时创建。
+看到 `"status":"ok"` 后，分别测试两个方向。脚本启动真实 Codex，用本地预设的模型响应驱动工具调用；另一端由脚本模拟。每次运行都使用临时身份和项目。
 
 ```sh
+npm ci
 node scripts/e2e-local.js send
 node scripts/e2e-local.js receive
 ```
 
-`send` 验证 Codex 主动发问、答案回到原会话。`receive` 验证指定项目里的新会话能够读取测试文件、回复脚本、在同一会话接收追问，以及为独立事项另建会话。用 `docker stop agent-relay-local` 停止，之后用 `docker start agent-relay-local` 可再次启动；中继重启后需重新登记。
+- **发送**。Codex 主动发问，模拟端返回随机编号。成功时，输出 JSON 中的 `send.reply_text` 就是原会话收到并在回答中使用的编号。
+- **接收**。脚本提问，Codex 从指定项目读取文件并回信。成功时，`receive.first.thread` 与 `receive.follow.thread` 相同，独立事项的 `receive.independent.thread` 不同。
 
-## 接入 MCP，在 Codex 中注册
+用 `docker stop agent-relay-local` 停止中继，用 `docker start agent-relay-local` 再次启动。真实模型的收发和文件读取结果见[单机 E2E 报告](docs/reports/2026-11-27-local-e2e.md)。
 
-在装有客户端的电脑上添加本地 MCP，将示例地址替换为自己的中继服务：
+## 和同事连接
+
+### 启动云端
+
+由一人运行单实例中继，双方使用同一个 HTTPS 地址。可以在服务器上沿用上面的 Docker 命令，再通过 HTTPS 反向代理将请求转至 `127.0.0.1:8787`。代理须保留路径和 `Authorization` 请求头，并为 `/v1/device-stream` 转发 WebSocket Upgrade。将下文的 `https://relay.example.com` 替换为实际地址。
+
+<details>
+<summary>直接用 Node.js 部署中继</summary>
+
+在仓库根目录构建，生成的服务端安装包可复制到服务器。服务器需安装兼容版本的 Node.js 和 npm。
+
+```sh
+npm ci
+npm run build
+npm pack --workspace @agent-relay/server
+npm install -g ./agent-relay-server-0.1.0.tgz
+agent-relay-server serve --host 127.0.0.1 --port 8787
+```
+
+上面的进程可接入 HTTPS 反向代理。也可由服务直接提供 TLS，使用 `--host 0.0.0.0 --port 8443 --tls-cert fullchain.pem --tls-key privkey.pem` 启动，客户端地址相应带上 `:8443`。
+
+</details>
+
+### 安装客户端，注册两个人
+
+两台电脑都需要 macOS 或 Linux、Node.js 24.5+、npm 和已登录的 Codex。Linux 客户端使用 util-linux 的 `flock`；系统凭据库使用 macOS 钥匙串或 Linux Secret Service（`secret-tool`）。在仓库根目录构建客户端，双方分别安装生成的包。
+
+```sh
+npm ci
+npm run build
+npm pack --workspace @agent-relay/client
+npm install -g ./agent-relay-client-0.1.0.tgz
+```
+
+在两台电脑上执行以下命令，把 MCP 接到同一个中继。
 
 ```sh
 codex mcp add peer -- agent-relay mcp --server https://relay.example.com
 ```
 
-Codex 加载工具后，直接说 **“用 peer 把这台电脑注册为 @alice”**。本地工具 `register_agent({"username":"alice"})` 会在中继服务中登记用户名和设备，只向会话返回用户名、设备 ID 和注册状态。另一位用户在自己的电脑上用同样方式注册 `@bob`。注册在连接器启动之前即可完成。
+Alice 在 Codex 中说“用 peer 把这台电脑注册为 @alice”，Bob 注册为 `@bob`。**两人都注册后，再授权项目。** 如果已提前填过对方的名字，等对方注册后重新运行授权命令。 用户名以字母开头，支持 2–32 个英文字母、数字、下划线或连字符。没有系统凭据库时，在上述 MCP 命令末尾加 `--credential-store file`，让凭据保存在本机用户的私有目录。
 
-用户名以字母开头，可使用 2–32 个英文字母、数字、下划线或连字符，系统按小写登记。同一台电脑重复注册同一个名字会返回原设备。已被别人登记的名字需换一个。凭据由本机生成并保存在系统凭据库。无系统凭据库的机器可在上面的 MCP 命令末尾显式添加 `--credential-store file`。双方注册完成后，各自选择要开放的本地项目和联系人。若项目所有者曾提前授权一个尚未注册的名字，需要在该用户注册后重新确认授权。
+### 各自选择收件项目
 
-## 在两台电脑上登记项目
-
-本地支持 macOS 和 Linux。Codex 需已登录，且其本机 app-server 支持代理连接、会话队列及 MCP 调用上下文。已对照的版本是 `0.171.0-alpha.13.2`。先在每台电脑上确认本地 Codex 能正常工作。仅使用 CLI 时，可用 `codex app-server daemon start` 启动本机共享进程，用 `codex app-server daemon version` 查看运行版本。希望将交互式 CLI 会话加入同一个共享进程时，使用 `codex --remote unix://`。
-
-甲执行以下命令，把目录换成自己的工程目录。setup 自动使用 MCP 注册时保存在本机的身份。
+将命令里的路径换成已有的本地项目目录。Alice 在自己的电脑上运行以下命令。
 
 ```sh
 agent-relay setup --server https://relay.example.com \
   --project /path/to/alice-project --target alice/app --allow bob
 ```
 
-乙执行以下命令，把自己的 isho-service 项目开放给 alice。
+Bob 在自己的电脑上开放 `isho-service` 项目。
 
 ```sh
 agent-relay setup --server https://relay.example.com \
   --project /path/to/isho-service --target bob/isho-service --allow alice
 ```
 
-默认使用 macOS Keychain 或 Linux Secret Service（需要 `secret-tool`）。setup 会向 Codex 注册名为 `peer` 的 stdio MCP 入口，并设置 macOS LaunchAgent 或 Linux 用户级 systemd 服务。若当前 Codex 会话尚未加载工具，重新打开该会话，并按宿主提示授权所需工具。设备在线、用户后台服务和本机 Codex 可用时可以无人收件，审批策略仍由电脑所有者决定。
+`setup` 会登记项目，并在 macOS 安装 LaunchAgent、在 Linux 安装用户级 systemd 服务。若当前 Codex 会话还看不到 `peer` 工具，重新打开会话。
 
-若计划让两人离开后自动查找和问答，可以由各自的所有者在 Codex 配置中预授权以下工具，然后重新加载配置。实测版本使用以下 TOML：
+## 发问、回信和追问
+
+Alice 可以直接在当前会话里说：“找到 @bob，问他服务端还支持哪些旧版 API。” Codex 通过以下工具完成这次协作。
+
+| 工具 | 何时使用 |
+| --- | --- |
+| `register_agent` | 用户主动登记自己和这台设备。 |
+| `search_peers` | 查找当前在线、且已授权自己提问的项目。例如按 `bob` 搜索。 |
+| `ask_peer` | 首问使用 `username` 或具体 `target`。同一用户名有多个可用项目时，选用明确的别名，如 `bob/isho-service`。追问沿用返回的 `conversation_id`。 |
+| `reply_to_peer` | 引用收到的问题消息号作答，也可用 `needs_info` 请求补充，或用 `needs_owner` 请项目所有者确认。 |
+
+`accepted` 表示对方的 Codex 已将问题放入会话队列。模型稍后作答，回信会作为新输入送回原会话。
+
+```mermaid
+sequenceDiagram
+    participant A as Alice 的会话 A 和连接器
+    participant R as 中继
+    participant B as Bob 的项目会话 B1 和连接器
+    A->>R: 向 @bob 提问
+    R->>B: 在指定项目新建 B1，投递首问
+    B->>R: 引用问题消息号回信
+    R->>A: 将答案送回 A
+    A->>R: 带原 conversation_id 追问
+    R->>B: 在同一个 B1 继续
+```
+
+## 权限、断线与重启
+
+- **项目权限**。自动创建的收件会话在登记项目中只读，关闭沙箱网络和其他 MCP。问题和答案的正文会经过中继，请使用团队信任的服务。中继用会话引用路由，项目路径和完整聊天记录保存在各自电脑。
+- **设备离线**。中继检测到断线后，设备从目录移除，离线期间的调用不会补投。双方重新在线且原协作仍可用时，可主动续问。如果发送后提示“投递未确认”，先核对收件会话或消息号，再决定是否重发。
+- **中继重启**。单个中继进程把注册、授权及会话路由保存在内存中，无需数据库。重启后用户名可被重新领取；双方要重新注册、核对彼此身份、用 `setup --allow` 发布项目，然后从本地聊天发起新协作。
+
+<details>
+<summary>调整联系人、指定已有会话及无人值守运行</summary>
+
+- 对同一项目和别名重跑 `setup`，用一个或多个 `--allow` 替换完整授权名单，或用 `--allow ''` 清空。也可为单独的目标别名设置 `--session-id <本机线程 ID>`，让获授权的请求通过该别名进入指定会话；已有会话沿用所有者的工具和审批设置。
+- 使用 `setup --manual` 时，自行运行 `agent-relay daemon`。若使用自定义 `--state-dir`，请在 MCP、setup 和 daemon 三个入口传同一个目录。只用交互式 CLI 时，可用 `codex app-server daemon start` 启动共享进程，再用 `codex --remote unix://` 接入。
+- 如需在人员离开后自动收发，项目所有者可以在自己的 Codex 配置中预先批准以下工具，重新加载配置后生效。
 
 ```toml
 [mcp_servers.peer.tools.search_peers]
@@ -106,25 +145,11 @@ approval_mode = "approve"
 approval_mode = "approve"
 ```
 
-- **首问的项目权限**　自动创建的会话使用专用的只读工作区，以登记目录为根，同时保留 Codex 的最小平台运行路径（macOS 包括系统临时目录），关闭沙箱网络和其他已配置的 MCP。回信通过 `peer` 工具送出。
-- **选择已有会话**　乙可为一个单独的别名添加 `--session-id <本机线程 ID>`，显式将获准的首问送进这个旧会话。客户端会核对该线程属于当前账号和登记目录。已有会话沿用所有者的工具和审批权限。
-- **调整联系人**　对同一个目录和别名再次运行 setup，使用一个或多个 `--allow` 指定完整名单。`--allow ''` 清空该目标的联系人。
-- **手动运行**　`setup --manual` 只登记设备和目标。已从 MCP 注册的用户保留原来的 MCP 入口，再在本机运行 `agent-relay daemon`。使用自定义状态目录时，这三个入口都要传入相同的 `--state-dir`。无系统凭据库的主机可显式选用 `--credential-store file`，凭据保存在当前用户的私有状态目录。
+</details>
 
-## 在 Codex 里使用
+## 文档与测试
 
-1. 甲在原会话 A 中说“找一下在线的 @bob，问他旧版客户端支持哪个接口版本”。`search_peers({"query":"bob"})` 列出乙对甲开放且在线的项目。有一个匹配项目时，甲可直接调用 `ask_peer({"username":"@bob","question":"旧版客户端支持哪个接口版本？"})`。有多个时，选择返回的项目别名并改用 `target` 发问。
-2. 乙的连接器在乙自己登记的项目里新建 B1。B1 的宿主确认问题已入队后，甲的工具返回 `accepted`、`conversation_id` 和 `message_id`。业务答案稍后回到 A。
-3. 乙用 `reply_to_peer` 回答，或以 `needs_info` 询问版本范围。甲带同一个 `conversation_id` 追问，问题继续进入 B1。甲重新用用户名发起另一件事，乙的项目会新建 B2。
-
-## 上线和重启
-
-| 情况 | 使用者会看到什么 |
-| --- | --- |
-| 一方休眠或断网 | 中继检测到断线后，该设备的项目从可搜索列表移除。发问或回信直接返回离线。恢复在线后，用户可沿原协作主动续问。 |
-| 已经发出，回执超时或断线 | 工具返回投递未确认，并在中继已生成编号时带上消息号。先核对原协作或收件会话，避免把同一问题再次送达。 |
-| 云端进程重启或发布新版本 | 用户名、设备登记、授权和协作号全部清空。双方分别在原 MCP 中再次调用 `register_agent`，确认彼此的用户名，再各自运行原来的 `setup --project … --allow …` 命令。使用 `--manual` 的用户自行重启本机连接器以加载配置。随后从原 Codex 聊天重新发起事项，对方会新建收件会话。 |
-
-云端每次启动都有独立的用户名空间，重启后用户名可被先注册的人取得。原聊天记录由各自的 Codex 管理。本机保留凭据、项目配置和会话引用，方便设备短暂断线或连接器重启后续问。转发正文经过云端，部署者应使用团队信任的服务。
-
-一期可用的目录是按联系人授权的在线项目列表。群邀请、入群即授权和群管理页面另见[群目录草案](docs/group-directory.md)。
+- [详细设计与完整时序](docs/design.md) · [下载全链路图](docs/flow.png)
+- [本机 Docker 收发 E2E 报告](docs/reports/2026-11-27-local-e2e.md)
+- [群目录设计草案](docs/group-directory.md)（后续方案，当前按项目授权）
+- 在仓库根目录运行 `npm test` 执行回归测试（需要 OpenSSL），运行 `npm run build` 构建客户端和服务端。在兼容的 Mac 上可用 `node scripts/smoke-codex.js` 单独检查 Codex 宿主适配器。
