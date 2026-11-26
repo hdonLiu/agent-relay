@@ -27,7 +27,7 @@ test('creates a read-only local thread and can queue its first input before it i
       assert.deepEqual(params.runtimeWorkspaceRoots, ['/work/app']);
       assert.equal(params.ephemeral, false);
       assert.equal(params.permissions, 'agent-relay-project');
-      assert.deepEqual(params.config['permissions.agent-relay-project.filesystem'], { ':workspace_roots': 'read' });
+      assert.deepEqual(params.config['permissions.agent-relay-project.filesystem'], { ':minimal': 'read', ':workspace_roots': 'read' });
       assert.equal(params.config['permissions.agent-relay-project.network.enabled'], false);
       assert.deepEqual(params.config.mcp_servers, { peer: { required: true }, unrelated: { enabled: false } });
       assert.equal(params.approvalPolicy, undefined);

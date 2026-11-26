@@ -69,7 +69,7 @@ export class CodexAdapter {
       permissions: 'agent-relay-project', runtimeWorkspaceRoots: [cwd],
       config: {
         default_permissions: 'agent-relay-project',
-        'permissions.agent-relay-project.filesystem': { ':workspace_roots': 'read' },
+        'permissions.agent-relay-project.filesystem': { ':minimal': 'read', ':workspace_roots': 'read' },
         'permissions.agent-relay-project.network.enabled': false,
         mcp_servers: { peer: { required: true }, ...Object.fromEntries(otherServers.map(name => [name, { enabled: false }])) },
         'features.apps': false, 'features.plugins': false, 'features.multi_agent': false,
