@@ -158,3 +158,37 @@ test('orphaned credentials survive reinstall; an interrupted pre-send journal ca
   assert.deepEqual(loadSecrets(options.stateDir, 'file'), keys);
   assert.deepEqual(claims[1], claims[0]);
 });
+
+test('explicit registration after a relay restart reuses device proof and discards old grants, including after a lost response', async t => {
+  let instance = 'instance-a';
+  let enrolled = false, dropClaimResponse = false;
+  const claims = [];
+  const options = await fixture(t, async (req, res, body) => {
+    res.setHeader('x-agent-relay-instance', instance);
+    if (req.url === '/mcp') {
+      if (!enrolled) return json(res, 401, { error: 'UNAUTHORIZED' });
+      return json(res, 200, { jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-11-25' } });
+    }
+    claims.push({ auth: req.headers.authorization, body });
+    enrolled = true;
+    if (dropClaimResponse) return req.socket.destroy();
+    json(res, 201, { user_id: body.username, device_id: body.device_id });
+  });
+  const registration = { ...options, username: 'alice' };
+  await registerAgent(registration);
+  const original = readSettings(options.stateDir);
+  original.targets = { project: { cwd: '/project', allowed_senders: ['bob'] } };
+  saveSettings(options.stateDir, original);
+  enrolled = false;
+  await assert.rejects(registerAgent(registration), { code: 'DEVICE_REVOKED' });
+  assert.equal(claims.length, 1);
+  assert.deepEqual(readSettings(options.stateDir), original);
+
+  instance = 'instance-b';
+  dropClaimResponse = true;
+  await assert.rejects(registerAgent(registration), { code: 'REGISTRATION_UNCONFIRMED' });
+  assert.deepEqual(readSettings(options.stateDir).targets.project, { cwd: '/project', allowed_senders: [] });
+  assert.equal((await registerAgent(registration)).targets_require_setup, true);
+  assert.deepEqual(claims, [claims[0], claims[0]]);
+  assert.equal(readSettings(options.stateDir).relay_instance_id, instance);
+});

@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { token, id } from '../collaboration/db.js';
+import { token, id } from '../collaboration/values.js';
+import { Registry } from '../registry/registry.js';
 import { RelayStore } from '../collaboration/store.js';
 import { createRelayServer } from '../http.js';
 
@@ -13,7 +10,7 @@ function registration(username) {
 }
 
 test('public registration creates usable credentials and safely replays a lost HTTP response', async t => {
-  const store = new RelayStore(':memory:');
+  const store = new RelayStore();
   const relay = createRelayServer({ store });
   t.after(async () => { await relay.close(); store.close(); });
   const { port } = await relay.listen(0);
@@ -46,7 +43,7 @@ test('public registration creates usable credentials and safely replays a lost H
 });
 
 test('conflicts roll back registration and preserve an existing operator identity and credential scopes', t => {
-  const store = new RelayStore(':memory:');
+  const store = new RelayStore();
   t.after(() => store.close());
   const legacy = store.issueUser('Legacy');
   const oldDevice = store.redeem(store.enroll('Legacy').code);
@@ -62,33 +59,49 @@ test('conflicts roll back registration and preserve an existing operator identit
   assert.equal(store.register(owner, alice).user_id, 'alice');
 });
 
-test('legacy grants survive migration, but a new public claimant needs a fresh decision from the sharing owner', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-signup-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'relay.db');
-  const previous = new RelayStore(file);
-  previous.issueUser('operator');
-  previous.issueUser('known');
-  const device = previous.redeem(previous.enroll('operator').code);
-  const target = { device_id: device.device_id, project_id: 'app', alias: 'operator/app',
-    allowed_senders: ['known', 'alice'] };
-  previous.putTarget('operator', 'T', target);
-  previous.close();
-  const oldSchema = new DatabaseSync(file);
-  oldSchema.exec('ALTER TABLE grants DROP COLUMN active');
-  oldSchema.close();
+test('newly claimed names require fresh grants; restarting discards all identities, projects and grants', () => {
+  const registry = new Registry();
+  const alice = registration('alice');
+  const bob = registration('bob');
+  const aliceOwner = token();
+  registry.register(token(), bob);
+  const project = {
+    device_id: bob.device_id, project_id: 'app', alias: 'bob/app', allowed_senders: ['alice'],
+  };
+  registry.putTarget('bob', 'T', project);
+  const identity = registry.register(aliceOwner, alice);
+  assert.deepEqual(registry.listTargets('alice'), []);
+  assert.equal(registry.resolveTarget('alice', 'bob/app'), null);
+  registry.putTarget('bob', 'T', project);
+  assert.deepEqual(registry.register(aliceOwner, alice), identity);
+  assert.equal(registry.resolveTarget('alice', 'bob/app').target_id, 'T');
 
-  const store = new RelayStore(file);
-  t.after(() => store.close());
-  assert.deepEqual(store.listTargets('known').map(row => row.target_id), ['T']);
-  const owner = token(), alice = registration('alice');
-  const identity = store.register(owner, alice);
-  assert.deepEqual(store.listTargets('alice'), []);
-  const ask = () => store.call(identity, 'ask_peer', { target: 'T', question: 'Hello?' },
-    { session_ref: 'A', request_id: 'R1' });
-  assert.throws(ask, { code: 'TARGET_UNAVAILABLE' });
-  store.putTarget('operator', 'T', target);
-  assert.deepEqual(store.register(owner, alice), identity);
-  assert.deepEqual(store.listTargets('alice').map(row => row.target_id), ['T']);
-  assert.ok(ask().conversation_id);
+  const restarted = new Registry();
+  assert.equal(restarted.userForToken(aliceOwner), null);
+  assert.equal(restarted.deviceForToken(bob.device_token, 'device'), null);
+  assert.deepEqual(restarted.listTargets('alice'), []);
+  assert.equal(restarted.canSend('alice', 'T'), false);
+  // Names can be re-claimed after a fresh boot; prior grants cannot follow them.
+  restarted.register(token(), registration('alice'));
+  assert.equal(restarted.resolveTarget('alice', 'bob/app'), null);
+  assert.throws(() => restarted.putTarget('bob', 'T', project), { code: 'UNAUTHORIZED' });
+});
+
+test('target aliases follow a project change while old target IDs keep their grants until withdrawn', () => {
+  const lost = [];
+  const registry = new Registry((targetId, sender) => lost.push([targetId, sender]));
+  const bob = registration('bob');
+  registry.register(token(), bob);
+  registry.register(token(), registration('alice'));
+  const target = { device_id: bob.device_id, project_id: 'one', alias: 'bob/project', allowed_senders: ['alice'] };
+  registry.putTarget('bob', 'original', target);
+  registry.putTarget('bob', 'replacement', { ...target, project_id: 'two' });
+  assert.equal(registry.resolveTarget('alice', 'bob/project').target_id, 'replacement');
+  assert.equal(registry.resolveTarget('alice', 'original').project_id, 'one');
+  assert.deepEqual(lost, []);
+  registry.putTarget('bob', 'original', { ...target, alias: null, allowed_senders: [] });
+  assert.equal(registry.resolveTarget('alice', 'original'), null);
+  assert.deepEqual(lost, [['original', 'alice']]);
+  registry.revokeDevice('bob', bob.device_id);
+  assert.deepEqual(registry.listTargets('alice'), []);
 });

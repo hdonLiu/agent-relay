@@ -15,8 +15,8 @@ const run = promisify(execFile);
 
 test('a fresh stdio MCP registers a username and device, then setup publishes its project with the stored identity', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'relay-signup-'));
-  const store = new RelayStore(join(dir, 'cloud.sqlite'));
-  const relay = createRelayServer({ store });
+  let store = new RelayStore();
+  let relay = createRelayServer({ store });
   const { port } = await relay.listen(0);
   const origin = 'http://127.0.0.1:' + port;
   const clients = new Set();
@@ -39,8 +39,7 @@ test('a fresh stdio MCP registers a username and device, then setup publishes it
     clients.add(client);
     return client;
   }
-  const claim = (client, username) =>
-    client.callTool({ name: 'register_agent', arguments: { username } });
+  const claim = (client, username) => client.callTool({ name: 'register_agent', arguments: { username } });
   const state = join(dir, 'alice');
   const first = await connect(state);
   const names = (await first.listTools()).tools.map((tool) => tool.name);
@@ -99,6 +98,43 @@ test('a fresh stdio MCP registers a username and device, then setup publishes it
   const [target] = store.listTargets('bob');
   assert.equal(target.device_id, identity.device_id);
   assert.equal(target.alias, 'alice/service');
+
+  // An empty replacement instance at the same address has no owners, grants or chats.
+  const oldInstance = (await (await fetch(origin + '/health')).json()).instance_id;
+  await relay.close();
+  store.close();
+  store = new RelayStore();
+  relay = createRelayServer({ store });
+  await relay.listen(port);
+  const newInstance = (await (await fetch(origin + '/health')).json()).instance_id;
+  assert.notEqual(newInstance, oldInstance);
+  assert.equal(store.userForToken(secrets.management_token), null);
+  assert.deepEqual(store.listTargets('bob'), []);
+  assert.deepEqual((await claim(reopened, 'alice')).structuredContent, {
+    ...identity,
+    targets_require_setup: true,
+  });
+  assert.equal((await claim(second, 'bob')).structuredContent.user_id, 'bob');
+  assert.deepEqual(store.listTargets('bob'), []);
+
+  const publish = [
+    cli,
+    'setup',
+    '--state-dir',
+    state,
+    '--manual',
+    '--project',
+    project,
+    '--target',
+    'alice/service',
+    '--agent-bin',
+    process.execPath,
+  ];
+  const options = { env: { ...process.env, AGENT_RELAY_USER_TOKEN: '' } };
+  await run(process.execPath, publish, options);
+  assert.deepEqual(store.listTargets('bob'), []);
+  await run(process.execPath, [...publish, '--allow', 'bob'], options);
+  assert.equal(store.listTargets('bob')[0].device_id, identity.device_id);
 
   // A partially restored state must not replace the only copy of the owner credential.
   rmSync(join(state, 'config.json'));

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { failure } from './store.js';
 
 function key(value) { return typeof value === 'string' && value.length > 0 && value.length <= 512; }
@@ -22,11 +23,11 @@ const permanent = new Set(['THREAD_UNAVAILABLE', 'SESSION_UNAVAILABLE', 'ACCESS_
   'TARGET_MISMATCH', 'INVALID_FRAME', 'ADAPTER_PROTOCOL_ERROR']);
 
 export class InboundDelivery {
-  constructor(store, targets, adapters, send) {
+  constructor(store, targets, adapters) {
     this.store = store;
     this.targets = targets;
     this.adapters = adapters;
-    this.send = send;
+    this.receipts = new Map();
     this.byConversation = new Map();
     this.active = new Map();
     this.stopped = false;
@@ -34,16 +35,16 @@ export class InboundDelivery {
 
   stop() { this.stopped = true; }
 
-  receive(frame, reconcileOnly = false) {
+  receive(frame, link) {
     if (this.stopped) return Promise.resolve();
     if (!valid(frame)) {
-      if (key(frame.message_id)) this.report(frame, 'INVALID_FRAME', false);
+      if (key(frame.message_id)) this.report(link, frame, 'INVALID_FRAME', false);
       return Promise.resolve();
     }
     const existing = this.active.get(frame.message_id);
     if (existing) return existing;
     const previous = this.byConversation.get(frame.conversation_id) ?? Promise.resolve();
-    const task = previous.catch(() => {}).then(() => this.process(frame, reconcileOnly)).finally(() => {
+    const task = previous.catch(() => {}).then(() => this.process(frame, link)).finally(() => {
       this.active.delete(frame.message_id);
       if (this.byConversation.get(frame.conversation_id) === task) this.byConversation.delete(frame.conversation_id);
     });
@@ -52,15 +53,10 @@ export class InboundDelivery {
     return task;
   }
 
-  report(frame, code, retryable) {
-    const report = this.store.report(frame.message_id, code, retryable);
-    if (report) this.send(report);
+  report(link, frame, code, retryable) {
+    link.send({ v: 1, type: 'report', report_id: randomUUID(), message_id: frame.message_id,
+      stage: 'delivery', code, retryable });
   }
-
-  acknowledge(frame, ref) {
-    this.send({ v: 1, type: 'ack', message_id: frame.message_id, bound_session_ref: ref });
-  }
-
   target(id) {
     const target = Object.hasOwn(this.targets, id) && this.targets[id];
     if (!target) throw failure('TARGET_UNAVAILABLE');
@@ -119,52 +115,36 @@ export class InboundDelivery {
     return session;
   }
 
-  async process(frame, reconcileOnly) {
-    if (this.stopped) return;
+  async process(frame, link) {
+    if (this.stopped || !link.isOpen()) return;
     const id = frame.message_id;
-    const row = this.store.receipt(id);
-    if (row && row.conversation !== frame.conversation_id) return this.report(frame, 'INVALID_FRAME', false);
-    if (row?.phase === 'accepted') return this.acknowledge(frame, row.ref);
-    let session, adapter;
+    const prior = this.receipts.get(id);
+    if (prior) {
+      if (prior.conversation !== frame.conversation_id) return this.report(link, frame, 'INVALID_FRAME', false);
+      if (prior.code) return this.report(link, frame, prior.code, prior.retryable);
+      return link.send({ v: 1, type: 'ack', message_id: id, bound_session_ref: prior.ref });
+    }
+    let session;
+    let delivering = false;
     try {
       session = await this.route(frame);
-      adapter = this.adapter(session.adapter);
-    } catch (error) {
-      return this.report(frame, safeCode(error, 'DELIVERY_UNCERTAIN'), error?.retryable === true);
-    }
-    if (row && row.ref !== session.ref) return this.report(frame, 'TARGET_MISMATCH', false);
-    if (row?.phase === 'submitting') {
-      let result;
-      try { result = await adapter.lookupDelivery(session.native_id, id); }
-      catch { result = 'unknown'; }
-      if (result === 'accepted') {
-        this.store.acceptSubmission(id, id, true);
-        return this.acknowledge(frame, session.ref);
-      }
-      if (result !== 'not_submitted') return this.report(frame, 'DELIVERY_UNCERTAIN', false);
-      // Persist the report that releases a cloud-side block before making this
-      // item ineligible for local reconciliation on the next start.
-      if (reconcileOnly) this.report(frame, 'HOST_NOT_SUBMITTED', true);
-      this.store.retrySubmission(id);
-      if (reconcileOnly) return;
-    }
-    // A local recovery pass may verify past submission, but only a fresh cloud
-    // dispatch authorizes a new one after reconnect or a change of grants.
-    if (reconcileOnly) return this.report(frame, 'HOST_NOT_SUBMITTED', true);
-    if (this.stopped) return;
-    this.store.beginSubmission(frame, session.ref);
-    let acceptance;
-    try {
+      if (this.stopped || !link.isOpen()) return;
+      const adapter = this.adapter(session.adapter);
       const target = frame.kind === 'question' ? this.target(this.store.binding(frame.conversation_id).target) : undefined;
-      acceptance = await adapter.deliver(session.native_id, frame, target);
+      if (frame.route.mode === 'create_if_unbound') {
+        link.send({ v: 1, type: 'bind', message_id: id, bound_session_ref: session.ref });
+      }
+      delivering = true;
+      const accepted = await adapter.deliver(session.native_id, frame, target);
+      if (!key(accepted?.submission_ref)) throw failure('DELIVERY_UNCONFIRMED');
     } catch (error) {
-      if (!definitelyUnsubmitted(error)) return this.report(frame, 'DELIVERY_UNCERTAIN', false);
-      const code = safeCode(error, 'HOST_UNAVAILABLE');
-      this.store.retrySubmission(id);
-      return this.report(frame, code, error.retryable ?? !permanent.has(code));
+      const uncertain = delivering && !definitelyUnsubmitted(error);
+      const code = uncertain ? 'DELIVERY_UNCONFIRMED' : safeCode(error, 'DELIVERY_UNCONFIRMED');
+      const retryable = !uncertain && (error?.retryable ?? !permanent.has(code));
+      this.receipts.set(id, { conversation: frame.conversation_id, code, retryable });
+      return this.report(link, frame, code, retryable);
     }
-    if (!key(acceptance?.submission_ref)) return this.report(frame, 'DELIVERY_UNCERTAIN', false);
-    this.store.acceptSubmission(id, acceptance.submission_ref);
-    this.acknowledge(frame, session.ref);
+    this.receipts.set(id, { conversation: frame.conversation_id, ref: session.ref });
+    link.send({ v: 1, type: 'ack', message_id: id, bound_session_ref: session.ref });
   }
 }

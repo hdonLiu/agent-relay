@@ -33,6 +33,11 @@ function failure(code, detail) {
 function daemonCall(socketPath, body) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
+    let written = false;
+    const lost = () => {
+      const code = written && body.tool !== 'search_peers' ? 'DELIVERY_UNCONFIRMED' : 'CONNECTOR_UNAVAILABLE';
+      reject(Object.assign(new Error(code), { code }));
+    };
     const req = http.request({
       socketPath, method: 'POST', path: '/call', agent: false,
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
@@ -47,7 +52,7 @@ function daemonCall(socketPath, body) {
         }
         chunks.push(chunk);
       });
-      res.on('error', reject);
+      res.on('error', lost);
       res.on('end', () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -56,14 +61,14 @@ function daemonCall(socketPath, body) {
             throw new Error('Invalid daemon result.');
           }
           resolve(result);
-        } catch (error) {
-          reject(error);
+        } catch {
+          lost();
         }
       });
     });
     req.setTimeout(35_000, () => req.destroy(new Error('Local relay timed out.')));
-    req.on('error', reject);
-    req.end(payload);
+    req.on('error', lost);
+    req.end(payload, () => { written = true; });
   });
 }
 
@@ -87,12 +92,15 @@ export async function runMcp({
     }
     if (tool === registrationTool) {
       try {
-        const { status, user_id, device_id } = await registerAgent({
+        const registration = await registerAgent({
           stateDir, serverUrl: registrationOrigin, credentialStore, username: args.username, adapterName,
         });
+        const detail = registration.targets_require_setup
+          ? ' Publish the local project again with setup and explicitly choose its allowed senders.'
+          : '';
         return {
-          content: [{ type: 'text', text: 'Registered @' + user_id + ' on this device.' }],
-          structuredContent: { status, user_id, device_id },
+          content: [{ type: 'text', text: 'Registered @' + registration.user_id + ' on this device.' + detail }],
+          structuredContent: registration,
         };
       } catch (error) {
         if (error instanceof RegistrationError) return failure(error.code, error.message);
@@ -107,10 +115,12 @@ export async function runMcp({
       return await daemonCall(path.join(stateDir, 'relay.sock'), {
         adapter: adapterName, ...origin, tool: tool.name, arguments: args,
       });
-    } catch {
+    } catch (error) {
       // A lost response may follow a committed operation. A new tool invocation
       // creates a new call ID and must not be suggested as an automatic retry.
-      return failure('CONNECTOR_UNAVAILABLE', 'No confirmed response from the local relay daemon. Check its status before submitting a new request.');
+      if (error.code === 'DELIVERY_UNCONFIRMED')
+        return failure(error.code, 'The connection closed before delivery was confirmed. Check the conversation before sending again.');
+      return failure('CONNECTOR_UNAVAILABLE', 'The local relay daemon is unavailable. Check its status.');
     }
   });
   await server.connect(transport);

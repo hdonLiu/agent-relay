@@ -2,7 +2,8 @@ import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { prepareDir, relayOrigin } from '../settings.js';
-import { LocalStore, failure, lockDirectory } from './store.js';
+import { LocalStore, failure } from './store.js';
+import { tryLock } from '../lock.js';
 import { InboundDelivery } from './inbound.js';
 import { OutboundCalls, toolError } from './outbound.js';
 import { deviceStream } from './device-stream.js';
@@ -39,11 +40,12 @@ export async function startDaemon({ config, stateDir, adapters, onError = code =
     if (typeof config[field] !== 'string' || !config[field]) throw failure('INVALID_DEVICE_CONFIG');
   }
   prepareDir(stateDir);
-  const unlock = lockDirectory(stateDir);
+  const unlock = tryLock(stateDir, 'daemon');
+  if (!unlock) throw failure('DAEMON_ALREADY_RUNNING');
   const socketPath = join(stateDir, 'relay.sock');
   const abort = new AbortController();
   const tracked = new Set();
-  let store, inbound, server, stream, timer, closing, socketBound = false, stop = false;
+  let inbound, server, stream, closing, socketBound = false, stop = false;
   function watch(promise) {
     tracked.add(promise);
     promise.catch(() => { if (!stop) onError('LOCAL_OPERATION_FAILED'); }).finally(() => tracked.delete(promise));
@@ -51,7 +53,6 @@ export async function startDaemon({ config, stateDir, adapters, onError = code =
 
   async function shutDown() {
     stop = true;
-    clearInterval(timer);
     abort.abort();
     stream?.close();
     inbound?.stop();
@@ -66,42 +67,18 @@ export async function startDaemon({ config, stateDir, adapters, onError = code =
       await closed;
       if (socketBound) await removeSocket(socketPath);
     } finally {
-      try { store?.close(); } finally { unlock(); }
+      unlock();
     }
   }
 
   try {
-    store = new LocalStore(stateDir, config);
+    const store = new LocalStore(stateDir, config);
     const outbound = new OutboundCalls(store, adapters, url, config, abort.signal);
-    inbound = new InboundDelivery(store, config.targets ?? {}, adapters, frame => stream.send(frame));
-    let draining = false;
-    async function recover() {
-      if (stop || draining) return;
-      draining = true;
-      try {
-        for (const frame of store.recoveryAcks()) stream.send(frame);
-        for (const frame of store.pendingReports()) stream.send(frame);
-        for (const frame of store.uncertainFrames()) {
-          if (stop) return;
-          watch(inbound.receive(frame, true));
-        }
-        for (const item of store.pendingCalls()) {
-          if (stop) return;
-          const result = await outbound.send(item);
-          // A single offline request should not produce one failed network
-          // connection per persisted item each time the network drops.
-          if (result?.structuredContent?.local_status === 'awaiting_confirmation') return;
-        }
-      } finally { draining = false; }
-    }
-
+    inbound = new InboundDelivery(store, config.targets ?? {}, adapters);
     stream = deviceStream({
       url, token: config.device_token, deviceId: config.device_id, onError,
-      onOpen: () => watch(recover()),
-      onFrame(frame) {
-        if (frame.type === 'ack_ok' && typeof frame.message_id === 'string') store.confirmAck(frame.message_id);
-        if (frame.type === 'report_ack' && typeof frame.report_id === 'string') store.confirmReport(frame.report_id);
-        if (frame.type === 'deliver') watch(inbound.receive(frame));
+      onFrame(frame, link) {
+        if (frame.type === 'deliver') watch(inbound.receive(frame, link));
       }
     });
     server = createServer((req, res) => {
@@ -123,8 +100,6 @@ export async function startDaemon({ config, stateDir, adapters, onError = code =
     socketBound = true;
     await fs.chmod(socketPath, 0o600);
     stream.start();
-    timer = setInterval(() => watch(recover()), 10_000);
-    watch(recover());
     return { close() { return closing ??= shutDown(); } };
   } catch (error) {
     await shutDown();

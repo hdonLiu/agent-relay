@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { tryLock } from './lock.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   hasSecrets,
@@ -55,28 +55,17 @@ const reject = (code) => {
   throw new RegistrationError(code);
 };
 
-// The MCP and interactive setup can run in different processes. SQLite releases
-// this lock on process exit; the short async wait also works within one process.
+// MCP registration and interactive setup share this short, process-scoped lock.
 export async function withRegistrationLock(stateDir, operation) {
   prepareDir(stateDir);
-  const db = new DatabaseSync(join(stateDir, 'registration-lock.sqlite'));
   const deadline = Date.now() + 25_000;
-  try {
-    db.exec('PRAGMA busy_timeout=0;');
-    for (;;) {
-      try {
-        db.exec('BEGIN IMMEDIATE;');
-        break;
-      } catch (err) {
-        if (err.errcode !== 5) throw err;
-        if (Date.now() >= deadline) reject('REGISTRATION_BUSY');
-        await delay(80);
-      }
-    }
-    return await operation();
-  } finally {
-    db.close();
+  let unlock;
+  while (!(unlock = tryLock(stateDir, 'registration'))) {
+    if (Date.now() >= deadline) reject('REGISTRATION_BUSY');
+    await delay(80);
   }
+  try { return await operation(); }
+  finally { unlock(); }
 }
 
 function usernameFor(input) {
@@ -121,7 +110,7 @@ async function post(url, headers, body) {
   }
 }
 
-async function confirmExisting(config, secrets) {
+async function confirmExisting(stateDir, config, secrets) {
   if (!secrets?.mcp_token) reject('CREDENTIAL_STORE_UNAVAILABLE');
   const id = randomUUID();
   const { response, data } = await post(
@@ -142,10 +131,46 @@ async function confirmExisting(config, secrets) {
       },
     }
   );
-  if (response.status === 401 || response.status === 403) reject('DEVICE_REVOKED');
-  if (!response.ok || data?.id !== id || typeof data.result?.protocolVersion !== 'string')
-    reject('REGISTRATION_UNCONFIRMED');
-  return { user_id: config.user_id, device_id: config.device_id, status: 'registered' };
+  const instance = response.headers.get('x-agent-relay-instance');
+  const changed = instance && instance !== config.relay_instance_id;
+  if (response.status === 401 || response.status === 403) {
+    if (!changed || !secrets.management_token) reject('DEVICE_REVOKED');
+    // Persist the grant reset before attempting to reclaim this identity. A
+    // lost HTTP response must never leave setup able to republish old grants.
+    clearGrants(config);
+    saveSettings(stateDir, config);
+    const claim = await claimIdentity(config.server_url, config.user_id, config.device_id, secrets);
+    config.relay_instance_id = claim.instance ?? instance;
+  } else {
+    if (!response.ok || data?.id !== id || typeof data.result?.protocolVersion !== 'string')
+      reject('REGISTRATION_UNCONFIRMED');
+    if (changed) {
+      clearGrants(config);
+      config.relay_instance_id = instance;
+    }
+  }
+  if (changed) saveSettings(stateDir, config);
+  return { user_id: config.user_id, device_id: config.device_id, status: 'registered',
+    ...(changed && Object.keys(config.targets ?? {}).length ? { targets_require_setup: true } : {}) };
+}
+
+function clearGrants(config) {
+  for (const target of Object.values(config.targets ?? {})) target.allowed_senders = [];
+}
+
+async function claimIdentity(origin, username, deviceId, secrets) {
+  const { response, data } = await post(
+    origin + '/v1/registrations',
+    { authorization: 'Bearer ' + secrets.management_token },
+    { username, device_id: deviceId, mcp_token: secrets.mcp_token, device_token: secrets.device_token }
+  );
+  if (response.status === 409 && data?.error === 'USERNAME_TAKEN') reject('USERNAME_TAKEN');
+  if (response.status === 403 && ['DEVICE_REVOKED', 'REGISTRATION_CREDENTIAL_CHANGED'].includes(data?.error))
+    reject(data.error);
+  if (response.status === 409 && data?.error === 'REGISTRATION_CONFLICT') reject('REGISTRATION_CONFLICT');
+  if (!response.ok && response.status < 500) reject('REGISTRATION_REJECTED');
+  if (!response.ok || data?.user_id !== username || data.device_id !== deviceId) reject('REGISTRATION_UNCONFIRMED');
+  return { user_id: data.user_id, device_id: data.device_id, instance: response.headers.get('x-agent-relay-instance') };
 }
 
 async function register({ stateDir, serverUrl, credentialStore }, username) {
@@ -163,7 +188,7 @@ async function register({ stateDir, serverUrl, credentialStore }, username) {
   if (config) {
     if (config.user_id.toLowerCase() !== username) reject('LOCAL_IDENTITY_MISMATCH');
     return confirmExisting(
-      config,
+      stateDir, config,
       credentialOperation(() => loadSecrets(stateDir, mode))
     );
   }
@@ -212,36 +237,21 @@ async function register({ stateDir, serverUrl, credentialStore }, username) {
   ) {
     reject('CREDENTIAL_STORE_UNAVAILABLE');
   }
-  const { response, data } = await post(
-    origin + '/v1/registrations',
-    { authorization: 'Bearer ' + secrets.management_token },
-    {
-      username,
-      device_id: pending.device_id,
-      mcp_token: secrets.mcp_token,
-      device_token: secrets.device_token,
+  let data;
+  try { data = await claimIdentity(origin, username, pending.device_id, secrets); }
+  catch (error) {
+    if (error.code === 'USERNAME_TAKEN') {
+      pending.username = null;
+      saveJson(intentFile, pending);
     }
-  );
-  if (response.status === 409 && data?.error === 'USERNAME_TAKEN') {
-    pending.username = null;
-    saveJson(intentFile, pending);
-    reject('USERNAME_TAKEN');
+    throw error;
   }
-  if (
-    response.status === 403 &&
-    ['DEVICE_REVOKED', 'REGISTRATION_CREDENTIAL_CHANGED'].includes(data?.error)
-  )
-    reject(data.error);
-  if (response.status === 409 && data?.error === 'REGISTRATION_CONFLICT')
-    reject('REGISTRATION_CONFLICT');
-  if (!response.ok && response.status < 500) reject('REGISTRATION_REJECTED');
-  if (!response.ok || data?.user_id !== username || data.device_id !== pending.device_id)
-    reject('REGISTRATION_UNCONFIRMED');
   saveSettings(stateDir, {
     server_url: origin,
     device_id: data.device_id,
     user_id: data.user_id,
     credential_store: mode,
+    ...(data.instance ? { relay_instance_id: data.instance } : {}),
     adapters: {},
     targets: {},
   });

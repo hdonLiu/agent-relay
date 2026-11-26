@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { failure } from './store.js';
 
 export function toolError(code, retryable = false) {
@@ -22,7 +22,7 @@ class RelayMcp {
   async post(message, notification = false) {
     const response = await fetch(this.url, {
       method: 'POST', redirect: 'error',
-      signal: AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]),
+      signal: AbortSignal.any([this.signal, AbortSignal.timeout(message.method === 'tools/call' ? 27_000 : 5_000)]),
       headers: {
         authorization: 'Bearer ' + this.token, 'x-agent-relay-device-id': this.deviceId, 'content-type': 'application/json',
         accept: 'application/json, text/event-stream', 'mcp-protocol-version': this.version
@@ -31,14 +31,12 @@ class RelayMcp {
     });
     if (!response.ok) {
       await response.body?.cancel();
-      // A request rejected on its size/type can never succeed by replay. It
-      // must not remain at the front of the device's offline outbox.
-      if (message.method === 'tools/call' && [400, 413, 415, 422].includes(response.status)) {
-        const code = response.status === 413 ? 'REQUEST_TOO_LARGE' : 'CLOUD_REQUEST_REJECTED';
+      if ([400, 401, 403, 413, 415, 422, 429].includes(response.status)) {
+        const code = [401, 403].includes(response.status) ? 'CLOUD_AUTH_FAILED'
+          : response.status === 413 ? 'REQUEST_TOO_LARGE' : 'CLOUD_REQUEST_REJECTED';
         throw Object.assign(failure(code), { rejected: true });
       }
-      const code = response.status === 401 || response.status === 403 ? 'CLOUD_AUTH_FAILED' : 'CLOUD_HTTP_ERROR';
-      throw failure(code, response.status >= 500 || response.status === 429);
+      throw failure('CLOUD_HTTP_ERROR');
     }
     if (notification) { await response.body?.cancel(); return; }
     const reply = await response.json();
@@ -66,15 +64,24 @@ class RelayMcp {
       this.initialization = null;
       throw error;
     });
-    await this.initialization;
-    const result = await this.post({
-      id: randomUUID(), method: 'tools/call', params: {
-        name: item.tool, arguments: JSON.parse(item.args),
-        _meta: { 'peer.example/context': { session_ref: item.ref, request_id: item.id } }
-      }
-    });
-    if (!Array.isArray(result.content)) throw failure('CLOUD_PROTOCOL_ERROR');
-    return result;
+    try { await this.initialization; }
+    catch (error) { return toolError(error.code || 'CLOUD_UNREACHABLE'); }
+    try {
+      const result = await this.post({
+        id: randomUUID(), method: 'tools/call', params: {
+          name: item.tool, arguments: item.args,
+          _meta: { 'peer.example/context': { session_ref: item.ref, request_id: item.id } }
+        }
+      });
+      if (!Array.isArray(result.content)) throw failure('CLOUD_PROTOCOL_ERROR');
+      return result;
+    } catch (error) {
+      if (error.rejected || item.tool === 'search_peers') return toolError(error.code || 'CLOUD_UNREACHABLE');
+      return {
+        isError: true, structuredContent: { code: 'DELIVERY_UNCONFIRMED', retryable: false, request_id: item.id },
+        content: [{ type: 'text', text: 'The relay could not confirm delivery. Check the conversation before sending again.' }]
+      };
+    }
   }
 }
 
@@ -83,55 +90,31 @@ export class OutboundCalls {
     this.store = store;
     this.adapters = adapters;
     this.cloud = new RelayMcp(url, config, signal);
-    this.active = new Map();
+    this.key = config.mcp_token;
+    this.calls = new Map();
   }
 
   local(input) {
     const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 512;
     if (!input || !validId(input.adapter) || !Object.hasOwn(this.adapters, input.adapter)
       || !validId(input.native_session_id) || (input.native_call_id != null && !validId(input.native_call_id))
-      || !['ask_peer', 'reply_to_peer'].includes(input.tool) || !input.arguments
+      || !['search_peers', 'ask_peer', 'reply_to_peer'].includes(input.tool) || !input.arguments
       || typeof input.arguments !== 'object' || Array.isArray(input.arguments)) {
       return toolError('CALL_CONTEXT_UNAVAILABLE');
     }
-    const session = this.store.mapSession(input.adapter, input.native_session_id);
-    const item = this.store.outboxItem(session.ref, input.native_call_id ?? randomUUID(), input.tool, input.arguments);
-    return this.send(item);
-  }
+    const { ref } = this.store.mapSession(input.adapter, input.native_session_id);
+    const id = createHmac('sha256', this.key)
+      .update(JSON.stringify([ref, input.tool, input.native_call_id ?? randomUUID()])).digest('hex');
+    const item = { ref, id, tool: input.tool, args: input.arguments };
+    if (item.tool === 'search_peers') return this.cloud.call(item);
 
-  send(item) {
-    if (item.result) return Promise.resolve(JSON.parse(item.result));
-    let task = this.active.get(item.id);
-    if (task) return task;
-    task = this.transmit(item).finally(() => this.active.delete(item.id));
-    this.active.set(item.id, task);
-    return task;
-  }
-
-  async transmit(item) {
-    try {
-      const result = await this.cloud.call(item);
-      if (!(result.isError && result.structuredContent?.retryable)) {
-        this.store.saveResult(item.id, result);
-      }
-      return result;
-    } catch (error) {
-      // The relay may have committed before a transport break. The persisted
-      // request ID is reused on every retry, including after process restart.
-      const code = typeof error.code === 'string' ? error.code : 'CLOUD_UNREACHABLE';
-      if (error.rejected) {
-        const result = toolError(code);
-        this.store.saveResult(item.id, result);
-        return result;
-      }
-      const detail = code === 'CLOUD_AUTH_FAILED'
-        ? 'The relay rejected the configured device credential. Check the device registration.'
-        : 'Cloud acceptance has not been confirmed.';
-      return {
-        isError: true,
-        structuredContent: { code, local_status: 'awaiting_confirmation', request_id: item.id },
-        content: [{ type: 'text', text: detail + ' The connector will retry this saved request. Keep its request ID: ' + item.id }]
-      };
-    }
+    // Tool schemas contain only scalar arguments. Retain a digest and outcome,
+    // so a repeated host call joins the original submission without saving text.
+    const digest = createHash('sha256').update(JSON.stringify(item.args, Object.keys(item.args).sort())).digest('hex');
+    const previous = this.calls.get(id);
+    if (previous) return previous.digest === digest ? previous.result : toolError('IDEMPOTENCY_CONFLICT');
+    const result = this.cloud.call(item);
+    this.calls.set(id, { digest, result });
+    return result;
   }
 }

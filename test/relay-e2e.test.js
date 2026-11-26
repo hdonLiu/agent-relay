@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setDefaultCACertificates, getCACertificates } from 'node:tls';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -18,7 +19,7 @@ import { readSettings, loadSecrets } from '../client/settings.js';
 const run = promisify(execFile);
 async function until(check) {
   for (let i = 0; i < 250; i++) {
-    const result = check();
+    const result = await check();
     if (result) return result;
     await delay(20);
   }
@@ -35,20 +36,13 @@ class ExampleHost {
     return id;
   }
   async deliver(id, frame) {
-    const entry = { id, frame };
-    this.events.push(entry);
-    if (this.onDelivery) await this.onDelivery(entry);
+    this.events.push({ id, frame });
     return { submission_ref: frame.message_id };
-  }
-  async lookupDelivery(id, messageId) {
-    return this.events.some((e) => e.id === id && e.frame.message_id === messageId)
-      ? 'accepted'
-      : 'unknown';
   }
 }
 
 test(
-  'two installed clients: stdio MCP → HTTPS → WSS → original sessions, even across offline delivery',
+  'two online devices discover each other and continue their original sessions; offline requests never replay',
   { timeout: 40_000 },
   async (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'relay-net-'));
@@ -81,10 +75,9 @@ test(
     );
     const trust = getCACertificates('default');
     setDefaultCACertificates([...trust, readFileSync(cert, 'utf8')]);
-    const store = new RelayStore(join(dir, 'cloud.db'));
+    const store = new RelayStore();
     const relay = createRelayServer({
       store,
-      retryMs: 500,
       tls: { cert: readFileSync(cert), key: readFileSync(key) },
     });
     const { port } = await relay.listen(0);
@@ -102,6 +95,31 @@ test(
     const hosts = { alice: new ExampleHost(), bob: new ExampleHost() };
     const devices = {};
     const program = resolve('client/index.js');
+    const mcp = {};
+    for (const name of ['alice', 'bob']) {
+      const state = join(dir, name);
+      const client = new Client({ name: 'fixture-' + name, version: '1' });
+      await client.connect(
+        new StdioClientTransport({
+          command: process.execPath,
+          args: [program, 'mcp', '--server', url, '--state-dir', state, '--credential-store', 'file'],
+          env: { NODE_EXTRA_CA_CERTS: cert },
+          stderr: 'pipe',
+        })
+      );
+      clients.push(client);
+      mcp[name] = (thread, tool, args, callId = randomUUID()) =>
+        client.callTool({
+          name: tool,
+          arguments: args,
+          _meta: { threadId: thread, callId },
+        });
+      assert.ok((await client.listTools()).tools.some((tool) => tool.name === 'search_peers'));
+      assert.equal(
+        (await mcp[name]('owner', 'register_agent', { username: name })).structuredContent.user_id,
+        name
+      );
+    }
     for (const [name, other] of [
       ['alice', 'bob'],
       ['bob', 'alice'],
@@ -109,15 +127,12 @@ test(
       const state = join(dir, name),
         project = join(dir, name + '-project');
       mkdirSync(project);
-      const token = store.issueUser(name);
       await run(
         process.execPath,
         [
           program,
           'setup',
           '--manual',
-          '--credential-store',
-          'file',
           '--server',
           url,
           '--state-dir',
@@ -131,7 +146,7 @@ test(
           '--agent-bin',
           process.execPath,
         ],
-        { env: { ...process.env, AGENT_RELAY_USER_TOKEN: token, NODE_EXTRA_CA_CERTS: cert } }
+        { env: { ...process.env, AGENT_RELAY_USER_TOKEN: '', NODE_EXTRA_CA_CERTS: cert } }
       );
       const conf = readSettings(state);
       devices[name] = {
@@ -167,89 +182,66 @@ test(
       await daemons.get(n).close();
       daemons.delete(n);
     }
-    async function mcp(n) {
-      const client = new Client({ name: 'fixture-' + n, version: '1' });
-      await client.connect(
-        new StdioClientTransport({
-          command: process.execPath,
-          args: [program, 'mcp', '--state-dir', devices[n].stateDir],
-          stderr: 'pipe',
-        })
-      );
-      clients.push(client);
-      assert.deepEqual(
-        (await client.listTools()).tools.map((v) => v.name),
-        ['ask_peer', 'reply_to_peer']
-      );
-      return async (thread, callId, name, args) => {
-        const result = await client.callTool({
-          name,
-          arguments: args,
-          _meta: { threadId: thread, callId },
-        });
-        assert.notEqual(result.isError, true, JSON.stringify(result.content));
-        return result.structuredContent;
-      };
+    async function ok(reply) {
+      const r = await reply;
+      assert.notEqual(r.isError, true, JSON.stringify(r.structuredContent));
+      return r.structuredContent;
     }
-    await online('alice');
-    const a = await mcp('alice'),
-      b = await mcp('bob');
-    const question = { target: 'bob/app', question: 'What is the oldest compatible app version?' };
-    const first = await a('original-A', 'a1', 'ask_peer', question);
-    assert.deepEqual(await a('original-A', 'a1', 'ask_peer', question), first);
-    const follow = await a('original-A', 'a2', 'ask_peer', {
-      conversation_id: first.conversation_id,
-      question: 'Please include Android.',
-    });
-    assert.equal(hosts.bob.events.length, 0);
-    await offline('alice');
-    let early;
-    hosts.bob.onDelivery = async ({ id, frame }) => {
-      if (frame.message_id === first.message_id) {
-        early = await b(id, 'b1', 'reply_to_peer', {
-          in_reply_to: frame.message_id,
-          outcome: 'needs_info',
-          text: 'Which branch?',
-        });
-        assert.equal(
-          store
-            .getConversation('bob', first.conversation_id)
-            .messages.some((x) => x.message_id === early.message_id && x.state === 'enqueued'),
-          false
-        );
-      }
+    const a = (tool, args, id) => mcp.alice('original-A', tool, args, id);
+    const b = (tool, args, id) => mcp.bob('fixture-thread-1', tool, args, id);
+    const sees = async (call, username) => {
+      const r = await call('search_peers', { query: username });
+      return r.isError ? undefined : r.structuredContent.peers.some((p) => p.username === username);
     };
+    await online('alice');
+    await until(async () => (await sees(a, 'bob')) === false);
+    const question = { username: '@bob', question: 'What is the oldest compatible app version?' };
+    const rejected = await a('ask_peer', question);
+    assert.equal(rejected.isError, true);
+    assert.equal(hosts.bob.events.length, 0);
+
     await online('bob');
-    await until(() => hosts.bob.events.length === 2);
+    await until(() => sees(a, 'bob'));
+    assert.equal(hosts.bob.events.length, 0);
+    const first = await ok(a('ask_peer', question, 'a1'));
+    assert.deepEqual(await ok(a('ask_peer', question, 'a1')), first);
     assert.equal(hosts.bob.created.length, 1);
+    assert.equal(hosts.bob.created[0].target.cwd, realpathSync(join(dir, 'bob-project')));
+
+    const clarification = await ok(
+      b('reply_to_peer', { in_reply_to: first.message_id, outcome: 'needs_info', text: 'Which branch?' })
+    );
+    const follow = await ok(
+      a('ask_peer', { conversation_id: first.conversation_id, question: 'Please include Android.' })
+    );
+    assert.equal(follow.conversation_id, first.conversation_id);
     assert.deepEqual(
       hosts.bob.events.map((e) => e.id),
       ['fixture-thread-1', 'fixture-thread-1']
     );
-    const answer = await b('fixture-thread-1', 'b2', 'reply_to_peer', {
+    await offline('alice');
+    await until(async () => (await sees(b, 'alice')) === false);
+    const answerBody = {
       in_reply_to: follow.message_id,
       outcome: 'answered',
       text: 'Android supports 3.8.',
-    });
+    };
+    assert.equal((await b('reply_to_peer', answerBody)).isError, true);
     await online('alice');
-    await until(() => hosts.alice.events.length === 2);
+    await until(() => sees(b, 'alice'));
+    const answer = await ok(b('reply_to_peer', answerBody));
     assert.deepEqual(
       hosts.alice.events.map((e) => e.id),
       ['original-A', 'original-A']
     );
     assert.deepEqual(
       hosts.alice.events.map((e) => e.frame.message_id),
-      [early.message_id, answer.message_id]
+      [clarification.message_id, answer.message_id]
     );
-    await until(() =>
-      store.getConversation('alice', first.conversation_id).messages.every((m) => m.state === 'enqueued')
-    );
-    const third = await a('original-A', 'a3', 'ask_peer', {
-      target: 'bob/app',
-      question: 'Unrelated issue',
-    });
-    assert.notEqual(third.conversation_id, first.conversation_id);
-    await until(() => hosts.bob.created.length === 2);
+
+    const fresh = await ok(a('ask_peer', { target: 'bob/app', question: 'Unrelated issue' }));
+    assert.notEqual(fresh.conversation_id, first.conversation_id);
+    assert.equal(hosts.bob.created.length, 2);
     assert.equal(hosts.alice.created.length, 0);
   }
 );

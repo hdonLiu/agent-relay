@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { runMcp } from '../mcp/index.js';
 
-test('local MCP lists two tools, forwards host-bound identity, rejects model-supplied routing', async t => {
+test('local MCP lists discovery and messaging tools, forwards host-bound identity, rejects model-supplied routing', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'peer-mcp-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const requests = [];
@@ -27,7 +27,7 @@ test('local MCP lists two tools, forwards host-bound identity, rejects model-sup
   const client = new Client({ name: 'isolated-test-host', version: '1.0.0' });
   t.after(async () => { await client.close(); await server.close(); });
   await client.connect(clientTransport);
-  assert.deepEqual((await client.listTools()).tools.map(tool => tool.name), ['ask_peer', 'reply_to_peer']);
+  assert.deepEqual((await client.listTools()).tools.map(tool => tool.name), ['search_peers', 'ask_peer', 'reply_to_peer']);
   const disabled = await client.callTool({ name: 'register_agent', arguments: { username: 'alice' } });
   assert.equal(disabled.structuredContent.code, 'UNKNOWN_TOOL');
   const arguments_ = { target: 'bob/app', question: 'Minimum version?' };

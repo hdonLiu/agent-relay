@@ -1,19 +1,27 @@
 // Public MCP tools shared by the local stdio and cloud HTTP endpoints.
 export const toolsList = [
   {
+    name: 'search_peers',
+    description:
+      'Find authorized projects whose receiving devices are online now. Search by username or target alias.',
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' } } },
+  },
+  {
     name: 'ask_peer',
     description:
-      'Ask another authorized agent for help. On first contact use target. For follow-ups or additional context use the original conversation_id. The answer arrives asynchronously in this conversation.',
+      'Ask another authorized agent for help. On first contact use username or an exact target. For follow-ups or additional context use the original conversation_id. The answer arrives asynchronously in this conversation.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       required: ['question'],
       properties: {
+        username: { type: 'string', minLength: 1, description: 'Online recipient username, e.g. @bob' },
         target: { type: 'string', minLength: 1, description: 'Authorized recipient target ID or alias' },
         conversation_id: { type: 'string', minLength: 1 },
         question: { type: 'string', minLength: 1 },
       },
-      oneOf: [{ required: ['target'] }, { required: ['conversation_id'] }],
+      oneOf: [{ required: ['username'] }, { required: ['target'] }, { required: ['conversation_id'] }],
     },
   },
   {

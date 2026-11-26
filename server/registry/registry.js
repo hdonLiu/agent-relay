@@ -1,30 +1,50 @@
-import { digest, fail, id, identifier, token } from '../collaboration/db.js';
+import { digest, fail, id, identifier, token } from '../collaboration/values.js';
 
 function validRegistrationToken(value) {
   return typeof value === 'string' && value.length === 43 &&
     Buffer.from(value, 'base64url').toString('base64url') === value;
 }
 
+function targetInfo(target) {
+  const { target_id, device_id, project_id, alias, owner_id, fixed_session_ref } = target;
+  return { target_id, device_id, project_id, alias, owner_id, fixed_session_ref };
+}
+
+// Each server instance owns its registry. Operations validate before changing
+// the maps and finish synchronously on the Node.js event loop.
 export class Registry {
-  constructor(db, terminate) {
-    this.db = db;
-    this.terminate = terminate;
+  constructor(onGrantRevoked = () => {}, onDeviceRevoked = () => {}) {
+    this.users = new Map();
+    this.devices = new Map();
+    this.credentials = new Map();
+    this.enrollments = new Map();
+    this.targets = new Map();
+    this.aliases = new Map();
+    this.onGrantRevoked = onGrantRevoked;
+    this.onDeviceRevoked = onDeviceRevoked;
   }
 
-  issueUser(userId) {
-    identifier(userId, 'user');
-    if (userId.includes('/')) fail('INVALID_ARGUMENTS', 400, 'User IDs cannot contain a slash');
+  #setUser(username, hash) {
+    const previous = this.users.get(username.toLowerCase());
+    if (previous) this.credentials.delete(previous.hash);
+    this.users.set(username.toLowerCase(), { username, hash });
+    this.credentials.set(hash, { scope: 'owner', user_id: username });
+  }
+
+  #setDevice(username, deviceId, mcpHash, deviceHash) {
+    this.devices.set(deviceId, { username, mcpHash, deviceHash, revoked: false });
+    this.credentials.set(mcpHash, { scope: 'mcp', device_id: deviceId, user_id: username });
+    this.credentials.set(deviceHash, { scope: 'device', device_id: deviceId, user_id: username });
+  }
+
+  issueUser(username) {
+    identifier(username, 'user');
+    if (username.includes('/')) fail('INVALID_ARGUMENTS', 400, 'User IDs cannot contain a slash');
+    const previous = this.users.get(username.toLowerCase());
+    if (previous && previous.username !== username) fail('USERNAME_TAKEN', 409);
     const value = token();
-    return this.db.transaction(() => {
-      // Existing exact IDs (including legacy case variants) retain credential rotation.
-      if (!this.db.get('SELECT 1 FROM users WHERE id=?', userId) &&
-          this.db.get('SELECT 1 FROM users WHERE id=? COLLATE NOCASE', userId)) {
-        fail('USERNAME_TAKEN', 409);
-      }
-      this.db.run('INSERT INTO users VALUES(?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash',
-        userId, digest(value));
-      return value;
-    });
+    this.#setUser(username, digest(value));
+    return value;
   }
 
   register(managementToken, body) {
@@ -42,125 +62,131 @@ export class Registry {
 
     const hashes = [managementToken, mcp_token, device_token].map(digest);
     const [ownerHash, mcpHash, deviceHash] = hashes;
+    const user = this.users.get(username);
+    const device = this.devices.get(device_id);
     const result = { user_id: username, device_id };
-    return this.db.transaction(() => {
-      const replay = this.db.get(`SELECT u.token_hash, d.revoked FROM users u JOIN devices d ON d.owner=u.id
-        WHERE u.id=? AND d.id=? AND d.mcp_hash=? AND d.device_hash=?`,
-        username, device_id, mcpHash, deviceHash);
-      if (replay) {
-        if (replay.revoked) fail('DEVICE_REVOKED', 403);
-        if (replay.token_hash !== ownerHash) fail('REGISTRATION_CREDENTIAL_CHANGED', 403);
-        return result;
-      }
-      if (this.db.get('SELECT 1 FROM users WHERE id=? COLLATE NOCASE', username)) fail('USERNAME_TAKEN', 409);
-      if (this.db.get('SELECT 1 FROM users WHERE token_hash IN (?,?,?)', ...hashes) ||
-          this.db.get(`SELECT 1 FROM devices WHERE id=? OR mcp_hash IN (?,?,?) OR device_hash IN (?,?,?)`,
-            device_id, ...hashes, ...hashes)) fail('REGISTRATION_CONFLICT', 409);
-      this.db.run('INSERT INTO users(id,token_hash) VALUES(?,?)', username, ownerHash);
-      this.db.run('INSERT INTO devices(id,owner,mcp_hash,device_hash) VALUES(?,?,?,?)',
-        device_id, username, mcpHash, deviceHash);
-      // Grants naming a previously unissued identity need confirmation by the sharing owner.
-      this.db.run('UPDATE grants SET active=0 WHERE sender=?', username);
+    if (device?.username === username && device.mcpHash === mcpHash && device.deviceHash === deviceHash) {
+      if (device.revoked) fail('DEVICE_REVOKED', 403);
+      if (user.hash !== ownerHash) fail('REGISTRATION_CREDENTIAL_CHANGED', 403);
       return result;
-    });
+    }
+    if (user) fail('USERNAME_TAKEN', 409);
+    if (device || hashes.some(hash => this.credentials.has(hash))) fail('REGISTRATION_CONFLICT', 409);
+    this.#setUser(username, ownerHash);
+    this.#setDevice(username, device_id, mcpHash, deviceHash);
+    // A freshly claimed name must be explicitly authorized by the sharing owner.
+    for (const target of this.targets.values()) target.senders.delete(username);
+    return result;
   }
 
   userForToken(value) {
     if (typeof value !== 'string' || !value) return null;
-    return this.db.get('SELECT id FROM users WHERE token_hash=?', digest(value))?.id ?? null;
+    const credential = this.credentials.get(digest(value));
+    return credential?.scope === 'owner' ? credential.user_id : null;
   }
 
-  enroll(userId) {
-    if (!this.db.get('SELECT 1 FROM users WHERE id=?', userId)) fail('UNAUTHORIZED', 401);
+  enroll(username) {
+    if (typeof username !== 'string' || this.users.get(username.toLowerCase())?.username !== username) {
+      fail('UNAUTHORIZED', 401);
+    }
+    const now = Date.now();
+    for (const [hash, entry] of this.enrollments) {
+      if (entry.expires <= now) this.enrollments.delete(hash);
+    }
     const code = token();
-    const expires = Date.now() + 10 * 60 * 1000;
-    this.db.run('DELETE FROM enrollments WHERE expires<=?', Date.now());
-    this.db.run('INSERT INTO enrollments VALUES(?,?,?)', digest(code), userId, expires);
+    const expires = now + 10 * 60 * 1000;
+    this.enrollments.set(digest(code), { username, expires });
     return { code, expires_at: new Date(expires).toISOString() };
   }
 
   redeem(code) {
     identifier(code, 'enrollment code');
     const hash = digest(code);
-    return this.db.transaction(() => {
-      const entry = this.db.get('SELECT owner FROM enrollments WHERE hash=? AND expires>?', hash, Date.now());
-      if (!entry) fail('INVALID_ENROLLMENT', 401);
-      const device = id(), mcp = token(), stream = token();
-      this.db.run('DELETE FROM enrollments WHERE hash=?', hash);
-      this.db.run('INSERT INTO devices(id,owner,mcp_hash,device_hash) VALUES(?,?,?,?)',
-        device, entry.owner, digest(mcp), digest(stream));
-      return { device_id: device, user_id: entry.owner, mcp_token: mcp, device_token: stream };
-    });
+    const entry = this.enrollments.get(hash);
+    this.enrollments.delete(hash);
+    if (!entry || entry.expires <= Date.now()) fail('INVALID_ENROLLMENT', 401);
+    const device = id(), mcp = token(), stream = token();
+    this.#setDevice(entry.username, device, digest(mcp), digest(stream));
+    return { device_id: device, user_id: entry.username, mcp_token: mcp, device_token: stream };
   }
 
   deviceForToken(value, scope) {
     if (typeof value !== 'string' || !value || !['mcp', 'device'].includes(scope)) return null;
-    const column = scope === 'mcp' ? 'mcp_hash' : 'device_hash';
-    return this.db.get(`SELECT id AS device_id,owner AS user_id FROM devices WHERE ${column}=? AND revoked=0`,
-      digest(value)) ?? null;
+    const credential = this.credentials.get(digest(value));
+    if (credential?.scope !== scope || this.devices.get(credential.device_id).revoked) return null;
+    return { user_id: credential.user_id, device_id: credential.device_id };
   }
 
-  requireDevice(device) {
-    if (!device || !this.db.get('SELECT 1 FROM devices WHERE id=? AND owner=? AND revoked=0',
-      device.device_id ?? null, device.user_id ?? null)) fail('UNAUTHORIZED', 401);
+  requireDevice(identity) {
+    const device = this.devices.get(identity?.device_id);
+    if (!device || device.revoked || device.username !== identity.user_id) fail('UNAUTHORIZED', 401);
   }
 
-  putTarget(owner, target, body) {
-    identifier(target, 'target_id');
+  putTarget(owner, targetId, body) {
+    identifier(targetId, 'target_id');
     if (!body || typeof body !== 'object') fail('INVALID_ARGUMENTS');
-    const dev = identifier(body.device_id, 'device_id');
+    const device = identifier(body.device_id, 'device_id');
     const project = identifier(body.project_id, 'project_id');
-    const alias = body.alias != null ? identifier(body.alias, 'alias') : null;
-    if (target.includes('/')) fail('INVALID_ARGUMENTS', 400, 'Target IDs cannot contain a slash');
+    const alias = body.alias == null ? null : identifier(body.alias, 'alias');
+    if (targetId.includes('/')) fail('INVALID_ARGUMENTS', 400, 'Target IDs cannot contain a slash');
     if (alias?.includes('/') && (!alias.startsWith(owner + '/') || alias === owner + '/')) {
       fail('ALIAS_NAMESPACE_MISMATCH', 400);
     }
-    const fixed = body.fixed_session_ref != null ? identifier(body.fixed_session_ref, 'fixed_session_ref') : null;
+    const fixed = body.fixed_session_ref == null ? null : identifier(body.fixed_session_ref, 'fixed_session_ref');
     if (!Array.isArray(body.allowed_senders) || body.allowed_senders.length > 1000) fail('INVALID_ARGUMENTS');
     const senders = new Set(body.allowed_senders.map(value => identifier(value, 'allowed sender')));
-    return this.db.transaction(() => {
-      this.requireDevice({ device_id: dev, user_id: owner });
-      const existing = this.db.get('SELECT * FROM targets WHERE id=?', target);
-      if (existing && existing.owner !== owner) fail('TARGET_UNAVAILABLE', 404);
-      if (existing && (existing.device !== dev || existing.project !== project || existing.fixed_ref !== fixed)) {
-        fail('TARGET_IMMUTABLE', 409);
+
+    this.requireDevice({ device_id: device, user_id: owner });
+    const existing = this.targets.get(targetId);
+    if (existing && existing.owner_id !== owner) fail('TARGET_UNAVAILABLE', 404);
+    if (existing && (existing.device_id !== device || existing.project_id !== project ||
+        existing.fixed_session_ref !== fixed)) fail('TARGET_IMMUTABLE', 409);
+    if ((this.aliases.has(targetId) && this.aliases.get(targetId) !== targetId) ||
+        (alias !== targetId && this.targets.has(alias))) fail('TARGET_NAME_CONFLICT', 409);
+    const previous = this.targets.get(this.aliases.get(alias));
+    if (previous && previous.owner_id !== owner) fail('TARGET_NAME_CONFLICT', 409);
+    if (previous) previous.alias = null;
+    if (existing?.alias) this.aliases.delete(existing.alias);
+    if (alias) this.aliases.set(alias, targetId);
+
+    const target = { target_id: targetId, device_id: device, project_id: project, alias, owner_id: owner,
+      fixed_session_ref: fixed, senders };
+    this.targets.set(targetId, target);
+    if (existing) {
+      for (const sender of existing.senders) {
+        if (!senders.has(sender)) this.onGrantRevoked(targetId, sender);
       }
-      // Aliases can move between endpoints of one owner. A stable target ID always keeps its identity.
-      if (this.db.get('SELECT 1 FROM targets WHERE alias=? AND id<>?', target, target) ||
-          this.db.get('SELECT 1 FROM targets WHERE id=? AND id<>?', alias, target)) fail('TARGET_NAME_CONFLICT', 409);
-      const previous = this.db.get('SELECT id,owner FROM targets WHERE alias=?', alias);
-      if (previous && previous.owner !== owner) fail('TARGET_NAME_CONFLICT', 409);
-      if (previous && previous.id !== target) this.db.run('UPDATE targets SET alias=NULL WHERE id=?', previous.id);
-      this.db.run(`INSERT INTO targets VALUES(?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET alias=excluded.alias`, target, owner, dev, project, alias, fixed);
-      const removed = this.db.all('SELECT sender FROM grants WHERE target=?', target)
-        .filter(row => !senders.has(row.sender));
-      this.db.run('DELETE FROM grants WHERE target=?', target);
-      for (const sender of senders) this.db.run('INSERT INTO grants(target,sender) VALUES(?,?)', target, sender);
-      for (const { sender } of removed) {
-        const conversations = this.db.all(`SELECT c.* FROM conversations c JOIN devices d ON d.id=c.origin_device
-          WHERE c.target=? AND d.owner=? AND c.terminal IS NULL`, target, sender);
-        for (const c of conversations) this.terminate(c, 'ACCESS_REVOKED');
-      }
-      return { target_id: target, device_id: dev, project_id: project, alias, fixed_session_ref: fixed,
-        allowed_senders: [...senders] };
-    });
+    }
+    return { target_id: targetId, device_id: device, project_id: project, alias,
+      fixed_session_ref: fixed, allowed_senders: [...senders] };
   }
 
-  listTargets(owner) {
-    return this.db.all(`SELECT t.id AS target_id,t.project AS project_id,t.alias,t.owner AS owner_id,
-      t.device AS device_id FROM targets t JOIN devices d ON d.id=t.device
-      WHERE d.revoked=0 AND (t.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.target=t.id AND g.sender=? AND g.active=1))
-      ORDER BY t.id`, owner, owner);
+  canSend(username, targetId) {
+    const target = this.targets.get(targetId);
+    return Boolean(target && !this.devices.get(target.device_id).revoked && target.senders.has(username));
   }
 
-  revokeDevice(owner, dev) {
-    return this.db.transaction(() => {
-      if (!this.db.get('SELECT 1 FROM devices WHERE id=? AND owner=?', dev, owner)) fail('DEVICE_UNAVAILABLE', 404);
-      this.db.run('UPDATE devices SET revoked=1 WHERE id=?', dev);
-      const cs = this.db.all(`SELECT * FROM conversations WHERE (origin_device=? OR peer_device=?) AND terminal IS NULL`, dev, dev);
-      for (const c of cs) this.terminate(c, 'ACCESS_REVOKED');
-      return { device_id: dev, revoked: true };
-    });
+  resolveTarget(username, address) {
+    const target = this.targets.get(address) ?? this.targets.get(this.aliases.get(address));
+    return target && this.canSend(username, target.target_id) ? targetInfo(target) : null;
+  }
+
+  listTargets(username) {
+    const visible = [];
+    for (const target of this.targets.values()) {
+      if (this.devices.get(target.device_id).revoked) continue;
+      if (target.owner_id === username || target.senders.has(username)) visible.push(targetInfo(target));
+    }
+    return visible.sort((a, b) => a.target_id.localeCompare(b.target_id));
+  }
+
+  revokeDevice(owner, deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || device.username !== owner) fail('DEVICE_UNAVAILABLE', 404);
+    if (!device.revoked) {
+      device.revoked = true;
+      this.onDeviceRevoked(deviceId);
+    }
+    return { device_id: deviceId, revoked: true };
   }
 }
