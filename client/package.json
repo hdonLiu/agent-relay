@@ -1,0 +1,20 @@
+{
+  "name": "@agent-relay/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.5.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "agent-relay": "./dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ws": "8.23.0",
+    "zod": "4.6.7"
+  }
+}
