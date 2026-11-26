@@ -5,6 +5,24 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { toolsList } from '../../protocol.js';
 import { getAdapterType } from '../adapters/index.js';
+import { registerAgent, RegistrationError } from '../registration.js';
+import { relayOrigin } from '../settings.js';
+
+const registrationTool = {
+  name: 'register_agent',
+  description: 'Register this device on the configured relay when its owner chooses a username. ' +
+    'Repeat with the same username to confirm registration.',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['username'],
+    properties: {
+      username: {
+        type: 'string',
+        description: '2–32 ASCII letters, digits, underscores or hyphens, starting with a letter. An initial @ is optional.',
+      },
+    },
+  },
+};
 
 function failure(code, detail) {
   return {
@@ -49,16 +67,37 @@ function daemonCall(socketPath, body) {
   });
 }
 
-export async function runMcp({ stateDir, adapterName = 'codex', transport = new StdioServerTransport() }) {
+export async function runMcp({
+  stateDir, adapterName = 'codex', serverUrl, credentialStore, transport = new StdioServerTransport(),
+}) {
   const provider = getAdapterType(adapterName);
+  const registrationOrigin = serverUrl === undefined ? undefined : relayOrigin(serverUrl);
+  if (credentialStore !== undefined && !['system', 'file'].includes(credentialStore)) {
+    throw new Error('Use --credential-store system or file.');
+  }
+  const localTools = registrationOrigin ? [...toolsList, registrationTool] : toolsList;
   const server = new Server({ name: 'agent-relay', version: '0.1.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolsList }));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: localTools }));
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
-    const tool = toolsList.find(t => t.name === params.name);
+    const tool = localTools.find(t => t.name === params.name);
     if (!tool) return failure('UNKNOWN_TOOL', 'Unknown agent relay tool.');
     const args = params.arguments ?? {};
     if (Object.keys(args).some(key => !Object.hasOwn(tool.inputSchema.properties, key))) {
       return failure('INVALID_ARGUMENTS', 'Unexpected tool argument. Use only the published business fields.');
+    }
+    if (tool === registrationTool) {
+      try {
+        const { status, user_id, device_id } = await registerAgent({
+          stateDir, serverUrl: registrationOrigin, credentialStore, username: args.username, adapterName,
+        });
+        return {
+          content: [{ type: 'text', text: 'Registered @' + user_id + ' on this device.' }],
+          structuredContent: { status, user_id, device_id },
+        };
+      } catch (error) {
+        if (error instanceof RegistrationError) return failure(error.code, error.message);
+        return failure('REGISTRATION_FAILED', 'Unable to register this device.');
+      }
     }
     let origin;
     try { origin = provider.identifyCall(params._meta); } catch {

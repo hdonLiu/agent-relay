@@ -28,6 +28,7 @@ export class Database {
       PRAGMA busy_timeout=5000;
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE);
+      CREATE INDEX IF NOT EXISTS username_nocase ON users(id COLLATE NOCASE);
       CREATE TABLE IF NOT EXISTS enrollments (
         hash TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES users, expires INTEGER NOT NULL
       );
@@ -41,8 +42,9 @@ export class Database {
       );
       CREATE TABLE IF NOT EXISTS grants (
         target TEXT NOT NULL REFERENCES targets, sender TEXT NOT NULL,
-        PRIMARY KEY(target,sender)
+        active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(target,sender)
       );
+      CREATE INDEX IF NOT EXISTS grants_by_sender ON grants(sender);
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY, target TEXT NOT NULL REFERENCES targets, origin_device TEXT NOT NULL REFERENCES devices,
         origin_ref TEXT NOT NULL, peer_device TEXT NOT NULL REFERENCES devices, peer_ref TEXT,
@@ -63,6 +65,12 @@ export class Database {
         PRIMARY KEY(device,id)
       );
     `);
+    // Older relays allowed operators to grant a future username before issuing its credentials.
+    this.transaction(() => {
+      if (!this.all('PRAGMA table_info(grants)').some(column => column.name === 'active')) {
+        this.sqlite.exec('ALTER TABLE grants ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+      }
+    });
   }
   run(sql, ...args) { return this.sqlite.prepare(sql).run(...args); }
   all(sql, ...args) { return this.sqlite.prepare(sql).all(...args); }

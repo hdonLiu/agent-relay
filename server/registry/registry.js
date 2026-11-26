@@ -1,5 +1,10 @@
 import { digest, fail, id, identifier, token } from '../collaboration/db.js';
 
+function validRegistrationToken(value) {
+  return typeof value === 'string' && value.length === 43 &&
+    Buffer.from(value, 'base64url').toString('base64url') === value;
+}
+
 export class Registry {
   constructor(db, terminate) {
     this.db = db;
@@ -10,9 +15,54 @@ export class Registry {
     identifier(userId, 'user');
     if (userId.includes('/')) fail('INVALID_ARGUMENTS', 400, 'User IDs cannot contain a slash');
     const value = token();
-    this.db.run('INSERT INTO users VALUES(?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash',
-      userId, digest(value));
-    return value;
+    return this.db.transaction(() => {
+      // Existing exact IDs (including legacy case variants) retain credential rotation.
+      if (!this.db.get('SELECT 1 FROM users WHERE id=?', userId) &&
+          this.db.get('SELECT 1 FROM users WHERE id=? COLLATE NOCASE', userId)) {
+        fail('USERNAME_TAKEN', 409);
+      }
+      this.db.run('INSERT INTO users VALUES(?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash',
+        userId, digest(value));
+      return value;
+    });
+  }
+
+  register(managementToken, body) {
+    if (!validRegistrationToken(managementToken)) fail('UNAUTHORIZED', 401);
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).some(key => !['username', 'device_id', 'mcp_token', 'device_token'].includes(key))) {
+      fail('INVALID_ARGUMENTS');
+    }
+    const { username, device_id, mcp_token, device_token } = body;
+    if (typeof username !== 'string' || !/^[a-z][a-z0-9_-]{1,31}$/.test(username)) fail('INVALID_USERNAME');
+    if (typeof device_id !== 'string' ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(device_id) ||
+        !validRegistrationToken(mcp_token) || !validRegistrationToken(device_token) ||
+        new Set([managementToken, mcp_token, device_token]).size !== 3) fail('INVALID_ARGUMENTS');
+
+    const hashes = [managementToken, mcp_token, device_token].map(digest);
+    const [ownerHash, mcpHash, deviceHash] = hashes;
+    const result = { user_id: username, device_id };
+    return this.db.transaction(() => {
+      const replay = this.db.get(`SELECT u.token_hash, d.revoked FROM users u JOIN devices d ON d.owner=u.id
+        WHERE u.id=? AND d.id=? AND d.mcp_hash=? AND d.device_hash=?`,
+        username, device_id, mcpHash, deviceHash);
+      if (replay) {
+        if (replay.revoked) fail('DEVICE_REVOKED', 403);
+        if (replay.token_hash !== ownerHash) fail('REGISTRATION_CREDENTIAL_CHANGED', 403);
+        return result;
+      }
+      if (this.db.get('SELECT 1 FROM users WHERE id=? COLLATE NOCASE', username)) fail('USERNAME_TAKEN', 409);
+      if (this.db.get('SELECT 1 FROM users WHERE token_hash IN (?,?,?)', ...hashes) ||
+          this.db.get(`SELECT 1 FROM devices WHERE id=? OR mcp_hash IN (?,?,?) OR device_hash IN (?,?,?)`,
+            device_id, ...hashes, ...hashes)) fail('REGISTRATION_CONFLICT', 409);
+      this.db.run('INSERT INTO users(id,token_hash) VALUES(?,?)', username, ownerHash);
+      this.db.run('INSERT INTO devices(id,owner,mcp_hash,device_hash) VALUES(?,?,?,?)',
+        device_id, username, mcpHash, deviceHash);
+      // Grants naming a previously unissued identity need confirmation by the sharing owner.
+      this.db.run('UPDATE grants SET active=0 WHERE sender=?', username);
+      return result;
+    });
   }
 
   userForToken(value) {
@@ -86,7 +136,7 @@ export class Registry {
       const removed = this.db.all('SELECT sender FROM grants WHERE target=?', target)
         .filter(row => !senders.has(row.sender));
       this.db.run('DELETE FROM grants WHERE target=?', target);
-      for (const sender of senders) this.db.run('INSERT INTO grants VALUES(?,?)', target, sender);
+      for (const sender of senders) this.db.run('INSERT INTO grants(target,sender) VALUES(?,?)', target, sender);
       for (const { sender } of removed) {
         const conversations = this.db.all(`SELECT c.* FROM conversations c JOIN devices d ON d.id=c.origin_device
           WHERE c.target=? AND d.owner=? AND c.terminal IS NULL`, target, sender);
@@ -100,7 +150,7 @@ export class Registry {
   listTargets(owner) {
     return this.db.all(`SELECT t.id AS target_id,t.project AS project_id,t.alias,t.owner AS owner_id,
       t.device AS device_id FROM targets t JOIN devices d ON d.id=t.device
-      WHERE d.revoked=0 AND (t.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.target=t.id AND g.sender=?))
+      WHERE d.revoked=0 AND (t.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.target=t.id AND g.sender=? AND g.active=1))
       ORDER BY t.id`, owner, owner);
   }
 

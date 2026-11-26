@@ -135,6 +135,10 @@ export function createRelayServer({ store, retryMs = 30_000, heartbeatMs = 30_00
         if (!authenticatesDevice(device, req)) throw fail(401, 'UNAUTHORIZED');
         return await handleMcp(req, res, store, device, notify);
       }
+      if (path === '/v1/registrations' && req.method === 'POST') {
+        if (!token) throw fail(401, 'UNAUTHORIZED');
+        return json(res, 200, store.register(token, await body(req)));
+      }
       if (path === '/v1/devices/redeem' && req.method === 'POST') {
         const data = await body(req);
         return json(res, 201, store.redeem(data.code));

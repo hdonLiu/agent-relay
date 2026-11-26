@@ -30,18 +30,21 @@ async function main() {
   });
   if (!command || v.help) {
     console.log(
-      'agent-relay setup [--server HTTPS_ORIGIN] [--project DIR] [--adapter NAME] [--agent-bin PATH] [--target ALIAS] [--allow USER] [--session-id NATIVE_ID] [--manual] [--credential-store system|file]\nagent-relay mcp [--adapter codex]\nagent-relay daemon\nAll commands accept --state-dir DIR.'
+      'agent-relay setup [--server HTTPS_ORIGIN] [--project DIR] [--adapter NAME] [--agent-bin PATH] [--target ALIAS] [--allow USER] [--session-id NATIVE_ID] [--manual] [--credential-store system|file]\nagent-relay mcp [--server HTTPS_ORIGIN] [--credential-store system|file] [--adapter codex]\nagent-relay daemon\nAll commands accept --state-dir DIR. Pass --server to mcp to enable username and device registration.'
     );
     return;
   }
   if (rest.length) throw new Error('Unexpected positional arguments.');
   const stateDir = resolve(v['state-dir'] || defaultStateDir());
   if (command === 'setup') return setup(v, stateDir, realpathSync(process.argv[1]));
-  if (command === 'mcp') return runMcp({ stateDir, adapterName: v.adapter || 'codex' });
+  if (command === 'mcp') return runMcp({
+    stateDir, adapterName: v.adapter || 'codex', serverUrl: v.server, credentialStore: v['credential-store'],
+  });
   if (command !== 'daemon') throw new Error('Unknown command. Use --help.');
   prepareDir(stateDir);
   const config = readSettings(stateDir);
-  Object.assign(config, loadSecrets(stateDir, config.credential_store));
+  const { mcp_token, device_token } = loadSecrets(stateDir, config.credential_store);
+  Object.assign(config, { mcp_token, device_token });
   const adapters = {};
   for (const [name, options] of Object.entries(config.adapters)) {
     let provider;

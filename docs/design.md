@@ -100,16 +100,17 @@ sequenceDiagram
 
 ## 3. 登记、授权和进程启动
 
-1. **运营者发放管理凭据。** 在云端服务器上使用 `agent-relay-server issue-user USER --db PATH` 为甲乙分别创建身份。`issue-user` 与 `serve` 使用同一数据库。对同一身份重新签发会轮换其管理凭据。服务默认监听回环地址，公网域名、证书和持久磁盘由部署者提供。
-2. **每台电脑运行 `agent-relay setup`。** 用户提供 HTTPS 服务地址、自己的管理凭据、本机项目路径和允许提问的账号。MVP 支持从终端输入凭据，也可从 `AGENT_RELAY_USER_TOKEN` 读取。setup 创建有效期十分钟的一次性登记码，立即兑换本设备的 `device_id`、`mcp_token` 和 `device_token`。重复配置同一状态目录时复用已有设备。
+1. **接入 MCP，登记本人及设备。** 用户在 Codex 中配置 `agent-relay mcp --server <中继地址>`，然后调用本地 `register_agent({username})`。服务地址来自 MCP 启动配置。首次注册由本机生成管理凭据、两种设备凭据和设备号，云端在单个事务中登记用户名和设备，只返回公开标识。相同身份重试复用同一设备，其他电脑不能凭用户名接管账号。连接、列举工具均不会自动创建账号。
+2. **选择本地项目。** 注册后用户运行 `agent-relay setup` 选择收件项目和联系人。setup 使用已保存的管理凭据和设备登记。管理员签发模式仍可用：运营者用 `issue-user USER` 发放管理凭据，setup 用它换取十分钟有效的一次性设备登记码并立即兑换。`issue-user` 再次签发将轮换该用户的管理凭据。
 3. **乙发布收件目标。** setup 的 `--adapter` 默认为 `codex`，可用 `--agent-bin` 指定本机可执行文件。目标对应的适配器、项目目录和可选原生线程号保存在本地。云端只登记设备号、项目号、允许的发送者、稳定目标 ID、别名及可选会话引用。默认别名为“所属用户/项目目录名”。带 `/` 的别名必须归该用户。`--allow` 可指定多个发送者，首次未授予联系人时其他人无法向该目标发问。`--session-id` 可将目标明确固定到一个已有原生线程。
 4. **配置宿主和后台。** 默认 setup 用 `codex mcp add` 注册名为 `peer` 的 stdio MCP 服务，安装并启动用户级 `agent-relay daemon`。macOS 使用 LaunchAgent，Linux 使用 systemd 用户服务。`--manual` 仅完成设备及项目登记，MCP 和 daemon 需自行启动。每个状态目录只允许一个活跃 daemon。为无人值守使用，宿主还须能处理该线程，所需工具授权由本机所有者配置。仅使用交互式 CLI 时可先运行 `codex app-server daemon start`，再以 `codex --remote unix://` 接入同一本机共享进程。用 `codex app-server daemon version` 核对 CLI 和运行中的 daemon 版本。[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 
-设备的两种凭据用途分开，服务端只保存摘要。设备被撤销时两种凭据一同失效。客户端默认使用 macOS 钥匙串或 Linux Secret Service。无凭据服务的机器可显式选择 `--credential-store file`，私有状态目录的权限为 `0700`，凭据文件为 `0600`。本机 MCP 入口通过当前用户私有的 `relay.sock` 联系后台，模型只提供业务字段。
+设备的两种凭据用途分开，服务端只保存摘要。设备被撤销时两种凭据一同失效。客户端默认使用 macOS 钥匙串或 Linux Secret Service。无凭据服务的机器可显式选择 `--credential-store file`，私有状态目录的权限为 `0700`，凭据文件为 `0600`。本机 MCP 的问答工具通过当前用户私有的 `relay.sock` 联系后台。首次注册由本地工具直接通过 HTTPS 访问中继，工具参数仅含用户名。自助注册设备的管理凭据也留在本机凭据库，供后续项目管理使用。
 
 | 管理操作 | 认证和返回值 |
 | --- | --- |
 | `POST /v1/device-enrollments` | 管理令牌，返回 `code` 和 `expires_at` |
+| `POST /v1/registrations` | 本地 MCP 提交新用户名、设备 ID 和本机生成的凭据，服务端只保存凭据摘要。重复提交相同登记可恢复丢失的响应。注册前仅按名字预留的项目授权需由项目所有者重新确认 |
 | `POST /v1/devices/redeem` | 以一次性 `code` 兑换 `device_id`、`user_id` 和两种设备凭据 |
 | `PUT /v1/targets/{id}` | 目标所有者写入 `device_id`、`project_id`、`alias`、`allowed_senders`，可选 `fixed_session_ref`。更新授权名单即替换旧名单 |
 | `GET /v1/targets` | 管理令牌，列出自己的目标和他人授权给自己的目标 |
@@ -121,7 +122,7 @@ sequenceDiagram
 
 ## 4. MCP 工具与幂等
 
-两个工具共享 32 KiB 的单条 UTF-8 正文上限。云端通过 `Authorization: Bearer` 识别设备，并从本地连接器写入的 `params._meta["peer.example/context"]` 读取 `session_ref` 和 `request_id`。这里的键是当前实现的固定值。代号和业务参数示例如下。
+两个问答工具共享 32 KiB 的单条 UTF-8 正文上限。云端通过 `Authorization: Bearer` 识别设备，并从本地连接器写入的 `params._meta["peer.example/context"]` 读取 `session_ref` 和 `request_id`。这里的键是当前实现的固定值。代号和业务参数示例如下。
 
 ```json
 {
@@ -197,6 +198,7 @@ sequenceDiagram
 
 | 层级 | 目前覆盖 | 还需在真实环境确认 |
 | --- | --- | --- |
+| MCP 注册 | 临时状态目录的 stdio MCP 完成首注、重启后确认和后续项目 setup；隔离的真实 Codex 会话也已通过本地固定模型响应触发注册，工具只返回公开身份 | 已部署实例的域名、凭据库存取及团队成员实际接入 |
 | 云端和设备账本 | 自动化测试覆盖离线、多轮、固定目标、批量排队、重放、提前答复、撤权、崩溃后核对 | 公网部署所用持久磁盘、证书、反向代理的 WebSocket 转发 |
 | 端到端传输 | 两套独立设备状态与真实 stdio MCP、HTTPS、WSS、SQLite 在同一测试机往返，宿主用测试替身，问题和回信到达预期会话 | 两台不同网络的电脑、不同账号、睡眠后唤醒和用户登录后的自启 |
 | Codex 原生队列 | 已在隔离环境对 Codex CLI `0.171.0-alpha.13.2` 运行本机代理与队列检查。本地固定模型响应触发真实 stdio MCP 答复，宿主提供线程号和调用号。同一原生线程的两轮输入可从队列和历史核对 | 使用实际账号与桌面前端，观察新输入唤醒原会话、权限审批以及 Agent 引用对方答案完成原任务 |

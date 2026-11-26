@@ -8,12 +8,13 @@ import { stdin, stderr } from 'node:process';
 import {
   saveSettings,
   readSettings,
-  prepareDir,
   saveSecrets,
   loadSecrets,
+  hasSecrets,
   relayOrigin,
 } from './settings.js';
 import { installService } from './service.js';
+import { withRegistrationLock } from './registration.js';
 import { sessionRefFor } from './connector/store.js';
 
 async function prompt(label, hidden = false) {
@@ -50,17 +51,32 @@ async function request(base, path, method, token, value) {
   return data;
 }
 export async function setup(v, stateDir, entry) {
-  prepareDir(stateDir);
+  return withRegistrationLock(stateDir, () => configureProject(v, stateDir, entry));
+}
+
+async function configureProject(v, stateDir, entry) {
   let config = existsSync(join(stateDir, 'config.json')) ? readSettings(stateDir) : null;
+  if (!config && existsSync(join(stateDir, 'registration.json'))) {
+    throw new Error(
+      'Finish the pending register_agent call in your MCP client before setting up a project.'
+    );
+  }
   const origin = relayOrigin(v.server || config?.server_url || (await prompt('Relay HTTPS origin')));
   if (config && config.server_url !== origin)
     throw new Error('Use a separate state directory for a different relay.');
-  const token =
-    process.env.AGENT_RELAY_USER_TOKEN ||
-    (await prompt('Management credential from your relay operator', true));
   const mode = v['credential-store'] || config?.credential_store || 'system';
   if (!['system', 'file'].includes(mode) || (config && mode !== config.credential_store))
     throw new Error('Invalid credential store. Use a separate device directory to change stores.');
+  if (!config && hasSecrets(stateDir, mode)) {
+    throw new Error(
+      'This device directory still has credentials. Restore its config or enroll in a new state directory.'
+    );
+  }
+  const saved = config ? loadSecrets(stateDir, mode) : null;
+  const token =
+    process.env.AGENT_RELAY_USER_TOKEN ||
+    saved?.management_token ||
+    (await prompt('Management credential from your relay operator', true));
   const cwd = realpathSync(resolve(v.project || (await prompt('Project directory'))));
   if (!statSync(cwd).isDirectory()) throw new Error('Project must be a directory');
   const adapterName = v.adapter || 'codex';
@@ -90,8 +106,6 @@ export async function setup(v, stateDir, entry) {
       ).catch(() => {});
       throw e;
     }
-  } else {
-    loadSecrets(stateDir, mode);
   }
   config.adapters[adapterName] = { binary };
   const alias = v.target || config.user_id + '/' + basename(cwd);
@@ -126,7 +140,13 @@ export async function setup(v, stateDir, entry) {
   };
   saveSettings(stateDir, config);
   if (!v.manual) {
-    provider.registerMcp({ binary, entry, stateDir, instance: adapterName });
+    provider.registerMcp({
+      binary,
+      entry,
+      stateDir,
+      instance: adapterName,
+      ...(saved?.management_token ? { serverUrl: origin, credentialStore: mode } : {}),
+    });
     installService(stateDir, entry);
   }
   await request(origin, '/v1/targets/' + targetId, 'PUT', token, {

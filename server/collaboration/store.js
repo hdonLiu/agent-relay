@@ -28,6 +28,7 @@ export class RelayStore {
     this.registry = new Registry(this.db, (c, reason) => this.mailbox.terminate(c, reason));
   }
 
+  register(managementToken, body) { return this.registry.register(managementToken, body); }
   issueUser(userId) { return this.registry.issueUser(userId); }
   userForToken(token) { return this.registry.userForToken(token); }
   enroll(userId) { return this.registry.enroll(userId); }
@@ -86,7 +87,7 @@ export class RelayStore {
 
   start(device, session, address) {
     const t = this.db.get(`SELECT t.* FROM targets t JOIN devices d ON d.id=t.device JOIN grants g ON g.target=t.id
-      WHERE (t.id=? OR t.alias=?) AND g.sender=? AND d.revoked=0`, address, address, device.user_id);
+      WHERE (t.id=? OR t.alias=?) AND g.sender=? AND g.active=1 AND d.revoked=0`, address, address, device.user_id);
     if (!t) fail('TARGET_UNAVAILABLE', 404);
     const conversation = id();
     this.db.run(`INSERT INTO conversations(id,target,origin_device,origin_ref,peer_device,peer_ref,created)

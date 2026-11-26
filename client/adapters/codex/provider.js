@@ -20,10 +20,11 @@ function resolveBinary(explicitPath) {
   throw new Error('Could not locate an executable Codex CLI. Supply its absolute path during setup.');
 }
 
-function registerMcp({ binary, entry, stateDir, instance = 'codex' }) {
+function registerMcp({ binary, entry, stateDir, instance = 'codex', serverUrl, credentialStore }) {
   // Capture the Node and entry paths at install time: a GUI may have a different PATH.
-  const result = spawnSync(binary, ['mcp', 'add', 'peer', '--', process.execPath,
-    entry, 'mcp', '--state-dir', stateDir, '--adapter', instance], { stdio: 'inherit', shell: false });
+  const args = ['mcp', 'add', 'peer', '--', process.execPath, entry, 'mcp', '--state-dir', stateDir, '--adapter', instance];
+  if (serverUrl) args.push('--server', serverUrl, '--credential-store', credentialStore);
+  const result = spawnSync(binary, args, { stdio: 'inherit', shell: false });
   if (result.error || result.status !== 0) throw new Error('Could not register the local Codex MCP tools.');
 }
 
