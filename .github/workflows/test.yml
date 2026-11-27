@@ -22,3 +22,41 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/installed" "$RUNNER_TEMP"/agent-relay-{server,client}-*.tgz
           "$RUNNER_TEMP/installed/node_modules/.bin/agent-relay" --help
           "$RUNNER_TEMP/installed/node_modules/.bin/agent-relay-server" --help
+
+  release-client:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/client-v') && !github.event.deleted
+    needs: relay
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Verify client version
+        run: |
+          version=$(node -p "require('./client/package.json').version")
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$GITHUB_REF_NAME" != "client-v$version" ]]; then
+            echo "::error::Expected stable client tag client-v$version"
+            exit 1
+          fi
+      - name: Build and verify the installable client
+        run: |
+          npm ci
+          npm run build
+          filename=$(npm pack --workspace @agent-relay/client --silent --pack-destination "$RUNNER_TEMP")
+          mv "$RUNNER_TEMP/$filename" "$RUNNER_TEMP/agent-relay-client.tgz"
+          npm install --global --prefix "$RUNNER_TEMP/client-install" "$RUNNER_TEMP/agent-relay-client.tgz"
+          "$RUNNER_TEMP/client-install/bin/agent-relay" --help
+      - name: Publish client release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/agent-relay-client.tgz"
+          printf 'Install with Node.js 24.5+ and npm.\n\n```sh\nnpm install -g %s\n```\n' "$asset_url" > "$RUNNER_TEMP/client-notes.md"
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/agent-relay-client.tgz" \
+            --verify-tag --title "Agent Relay client ${GITHUB_REF_NAME#client-v}" --notes-file "$RUNNER_TEMP/client-notes.md"

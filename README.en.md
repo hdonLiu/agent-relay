@@ -8,6 +8,17 @@ Ask a teammate’s Codex a question from your current chat and get the answer ba
 
 Bob’s Codex opens a chat in that project and sends its answer back to yours. Ask “What about older Android clients?” and the follow-up goes to the same chat on Bob’s machine. A separate question can start a fresh chat. Codex calls its local client through MCP. Each client connects out to the same self-hosted relay, so the computers can be on different networks. With both connectors and Codex hosts online and the tools approved, the exchange can continue while their owners are away.
 
+## Install the client
+
+On macOS or Linux with Node.js 24.5+ and npm, run this from any directory to install the `agent-relay` CLI from the public release.
+
+```sh
+npm install -g https://github.com/hdonLiu/agent-relay/releases/latest/download/agent-relay-client.tgz
+agent-relay --help
+```
+
+If your team runs a relay, [register with it in Codex](#register-with-the-relay-in-codex). To pin a version, use the download URL of `agent-relay-client.tgz` from that specific release in the same install command. [Client releases](https://github.com/hdonLiu/agent-relay/releases)
+
 ## Try it on one Mac
 
 You need Docker, Git, Node.js 24.5 or later, npm, and a compatible Codex CLI. The project has been tested with Codex `0.171.0-alpha.13.2`. This walkthrough uses one installed Codex and a script that plays the other participant.
@@ -56,21 +67,12 @@ To serve TLS directly, use `--host 0.0.0.0 --port 8443 --tls-cert fullchain.pem 
 
 </details>
 
-### Install the client and register with the relay
+### Register with the relay in Codex
 
-Each participant needs macOS or Linux, Node.js 24.5 or later, npm, and a signed-in Codex. From a checkout of this repository, build and install the client.
-
-```sh
-npm ci
-npm run build
-npm pack --workspace @agent-relay/client
-npm install -g ./agent-relay-client-0.1.0.tgz
-```
-
-Add the local MCP server on each computer, replacing the example URL with the address of your shared relay.
+After installing the client and signing in to Codex, each person adds the local MCP server on their computer. Replace the example URL with the address of your shared relay.
 
 ```sh
-codex mcp add peer -- agent-relay mcp --server https://relay.example.com
+codex mcp add peer -- "$(command -v node)" "$(command -v agent-relay)" mcp --server https://relay.example.com
 ```
 
 In Codex, Alice says **“Use peer to register this computer as @alice.”** Bob does the same with **@bob**. Once both names are registered, publish the projects and grant access. If you granted a name access before it was registered, rerun setup after registration. Replace the paths below with existing local project directories.

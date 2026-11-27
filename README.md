@@ -10,6 +10,17 @@ Bob 的 Codex 在他指定的 `isho-service` 项目里新建会话，查看代�
 
 两台电脑可以在不同网络。Codex 通过 MCP 调用本地客户端，客户端主动连到同一个自托管中继。项目所有者决定谁可以提问、在哪个目录接收。双方设备和连接器在线、Codex 已获工具授权时，人可以离开聊天窗口。
 
+## 安装客户端
+
+在 macOS 或 Linux 上准备 Node.js 24.5+ 和 npm，在任意目录运行以下命令，即可从公开发行页安装 `agent-relay`。
+
+```sh
+npm install -g https://github.com/hdonLiu/agent-relay/releases/latest/download/agent-relay-client.tgz
+agent-relay --help
+```
+
+已有团队中继地址，可以继续[在 Codex 中注册](#在-codex-中注册)。要锁定版本，可打开相应发行版，复制该版本中 `agent-relay-client.tgz` 的下载地址用于同一安装命令。[客户端发行页](https://github.com/hdonLiu/agent-relay/releases)
+
 ## 本机 Docker 和分段测试
 
 **只有一台 Mac 也能试。** 准备 Git、Docker、Node.js 24.5 或更高版本、npm 和兼容的 Codex CLI（已验证 `0.171.0-alpha.13.2`）。克隆仓库并启动中继，端口只对本机开放。
@@ -58,21 +69,12 @@ agent-relay-server serve --host 127.0.0.1 --port 8787
 
 </details>
 
-### 安装客户端，注册两个人
+### 在 Codex 中注册
 
-两台电脑都需要 macOS 或 Linux、Node.js 24.5+、npm 和已登录的 Codex。Linux 客户端使用 util-linux 的 `flock`；系统凭据库使用 macOS 钥匙串或 Linux Secret Service（`secret-tool`）。在仓库根目录构建客户端，双方分别安装生成的包。
-
-```sh
-npm ci
-npm run build
-npm pack --workspace @agent-relay/client
-npm install -g ./agent-relay-client-0.1.0.tgz
-```
-
-在两台电脑上执行以下命令，把 MCP 接到同一个中继。
+双方分别安装好客户端并登录自己的 Codex 后，在各自电脑上添加 MCP。将示例地址换成同一个团队中继的地址。Linux 还需要 util-linux 的 `flock`；系统凭据库使用 macOS 钥匙串或 Linux Secret Service（`secret-tool`）。
 
 ```sh
-codex mcp add peer -- agent-relay mcp --server https://relay.example.com
+codex mcp add peer -- "$(command -v node)" "$(command -v agent-relay)" mcp --server https://relay.example.com
 ```
 
 Alice 在 Codex 中说“用 peer 把这台电脑注册为 @alice”，Bob 注册为 `@bob`。**两人都注册后，再授权项目。** 如果已提前填过对方的名字，等对方注册后重新运行授权命令。 用户名以字母开头，支持 2–32 个英文字母、数字、下划线或连字符。没有系统凭据库时，在上述 MCP 命令末尾加 `--credential-store file`，让凭据保存在本机用户的私有目录。
