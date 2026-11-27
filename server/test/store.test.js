@@ -33,7 +33,6 @@ function setup(t, options) {
     device_id: bob.device_id,
     project_id: 'isho',
     alias: 'bob/isho',
-    allowed_senders: ['alice'],
   };
   store.putTarget('bob', 'project', target);
   const call = (device, tool, args, session_ref, request_id) =>
@@ -51,17 +50,21 @@ function setup(t, options) {
   return { store, alice, bob, carol, online, frames, live, target, call, search, ask, reply };
 }
 
-test('only authorized online projects are discoverable, and a sender must also be online', async (t) => {
+test('online peers discover published projects without naming senders, including with an older publisher', async (t) => {
   const { store, alice, bob, carol, online, target, call, search, ask, frames } = setup(t);
   store.putTarget('bob', 'fixed', { ...target, alias: 'bob/existing', fixed_session_ref: 'private' });
   const expected = { peers: [{ username: 'bob', target: 'bob/isho', target_id: 'project' }] };
   assert.deepEqual(await search(alice, { query: '@Bob' }), expected);
   assert.deepEqual(await search(alice, { query: 'isho' }), expected);
-  assert.deepEqual(await search(carol), { peers: [] });
+  assert.deepEqual(await search(carol), expected);
   assert.deepEqual(await search(bob), { peers: [] });
-  await assert.rejects(call(carol, 'ask_peer', { username: 'bob', question: 'hi' }, 'C', 'x'), {
-    code: 'TARGET_UNAVAILABLE',
-  });
+  // v0.1.0 publishers still include this field when registering a project.
+  store.putTarget('bob', 'project', { ...target, allowed_senders: ['alice'] });
+  assert.deepEqual(await search(carol), expected);
+  const question = call(carol, 'ask_peer', { username: 'bob', question: 'hi' }, 'C', 'x');
+  assert.equal(frames[0].id, bob.device_id);
+  store.ack(bob, ack(frames[0], 'B'));
+  await question;
   online.delete(bob.device_id);
   assert.deepEqual(await search(alice), { peers: [] });
   await assert.rejects(ask({ username: 'bob', question: 'reachable?' }), { code: 'PEER_OFFLINE' });
@@ -70,11 +73,11 @@ test('only authorized online projects are discoverable, and a sender must also b
   await assert.rejects(search(alice), { code: 'DEVICE_OFFLINE' });
   await assert.rejects(ask({ username: 'bob', question: 'reachable?' }), { code: 'DEVICE_OFFLINE' });
   assert.deepEqual(store.listConversations('alice'), []);
-  assert.deepEqual(frames, []);
+  assert.equal(frames.length, 1);
 });
 
 test('username chooses an owned project, subsequent turns preserve both original sessions', async (t) => {
-  const { store, alice, bob, carol, frames, ask, reply } = setup(t);
+  const { store, alice, bob, carol, call, frames, ask, reply } = setup(t);
   const args = { username: '@Bob', question: 'Which version?' };
   const first = ask(args);
   const duplicate = ask({ question: args.question, username: 'bob' });
@@ -110,6 +113,14 @@ test('username chooses an owned project, subsequent turns preserve both original
   await assert.rejects(ask({ conversation_id: q.conversation_id, question: 'hi' }, 'other', 'A2'), {
     code: 'CONVERSATION_UNAVAILABLE',
   });
+  await assert.rejects(
+    call(carol, 'ask_peer', { conversation_id: q.conversation_id, question: 'hi' }, 'A', 'R5'),
+    { code: 'CONVERSATION_UNAVAILABLE' }
+  );
+  await assert.rejects(
+    call(carol, 'reply_to_peer', { in_reply_to: q.message_id, outcome: 'answered', text: 'hi' }, 'B', 'R6'),
+    { code: 'QUESTION_UNAVAILABLE' }
+  );
 
   const next = ask({ target: 'bob/isho', question: 'Independent?' }, 'R4', 'A2');
   const second = frames[2];
@@ -227,30 +238,34 @@ test('write rejection leaves no work behind, and a missing ACK expires without r
   assert.equal(frames.length, 1);
 });
 
-test('revoking a grant or receiving a terminal host error stops the original conversation', async (t) => {
-  const { store, alice, bob, target, frames, ask, reply } = setup(t);
+test('revoking the origin device stops in-flight messages and closes its conversation', async (t) => {
+  const { store, alice, bob, frames, ask, reply } = setup(t);
   const first = ask({ target: 'project', question: 'Before revoke' });
   const [q] = frames;
-  store.putTarget('bob', 'project', { ...target, allowed_senders: [] });
+  store.revokeDevice('alice', alice.device_id);
   await assert.rejects(first, { code: 'ACCESS_REVOKED' });
-  store.putTarget('bob', 'project', target);
   assert.equal(store.ack(bob, ack(q, 'B')).status, 'closed');
   await assert.rejects(reply(q), { code: 'ACCESS_REVOKED' });
-  const second = ask({ target: 'project', question: 'After regrant' }, 'R3');
-  const q2 = frames[1];
-  store.ack(bob, ack(q2, 'B2'));
-  await second;
-  const answer = reply(q2, 'B2');
+  assert.equal(store.getConversation('bob', q.conversation_id).closed_reason, 'ACCESS_REVOKED');
+});
+
+test('receiving a terminal host error stops the original conversation', async (t) => {
+  const { store, alice, bob, frames, ask, reply } = setup(t);
+  const question = ask({ target: 'project', question: 'Ready?' });
+  const q = frames[0];
+  store.ack(bob, ack(q, 'B'));
+  await question;
+  const answer = reply(q);
   const fail = {
     v: 1,
     type: 'report',
     report_id: 'report',
-    message_id: frames[2].message_id,
+    message_id: frames[1].message_id,
     code: 'THREAD_UNAVAILABLE',
   };
   assert.deepEqual(store.report(alice, fail), { v: 1, type: 'report_ack', report_id: 'report' });
   await assert.rejects(answer, { code: 'THREAD_UNAVAILABLE' });
-  assert.equal(store.getConversation('alice', q2.conversation_id).closed_reason, 'THREAD_UNAVAILABLE');
+  assert.equal(store.getConversation('alice', q.conversation_id).closed_reason, 'THREAD_UNAVAILABLE');
 });
 
 test('bounded live metadata evicts inactive conversations, and a fresh store has no prior state', async (t) => {

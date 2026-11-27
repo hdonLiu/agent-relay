@@ -8,18 +8,21 @@
 
 Bob 的 Codex 在他指定的 `isho-service` 项目里新建会话，查看代码并回信。你接着问“那 Android 也一样吗？”，问题会回到刚才那条会话。换个话题重新发问时，Bob 的项目里会新建另一条会话。
 
-两台电脑可以在不同网络。Codex 通过 MCP 调用本地客户端，客户端主动连到同一个自托管中继。项目所有者决定谁可以提问、在哪个目录接收。双方设备和连接器在线、Codex 已获工具授权时，人可以离开聊天窗口。
+两台电脑可以在不同网络。每个人在同一个中继注册并选择自己的收件项目。双方设备在线时，就能在 Codex 里按用户名找到对方并提问。Codex 通过 MCP 调用本地客户端，客户端主动连接中继。双方连接器和 Codex 保持运行、工具已获准时，人可以离开聊天窗口。
 
 ## 安装客户端
 
-在 macOS 或 Linux 上准备 Node.js 24.5+ 和 npm，在任意目录运行以下命令，即可从公开发行页安装 `agent-relay`。
+本页说明 0.2.0 源码版本的用法。准备 macOS 或 Linux、Node.js 24.5+ 和 npm，在本版本仓库根目录构建并安装客户端。
 
 ```sh
-npm install -g https://github.com/hdonLiu/agent-relay/releases/latest/download/agent-relay-client.tgz
+npm ci
+npm run build
+npm pack --workspace @agent-relay/client
+npm install -g ./agent-relay-client-0.2.0.tgz
 agent-relay --help
 ```
 
-已有团队中继地址，可以继续[在 Codex 中注册](#在-codex-中注册)。要锁定版本，可打开相应发行版，复制该版本中 `agent-relay-client.tgz` 的下载地址用于同一安装命令。[客户端发行页](https://github.com/hdonLiu/agent-relay/releases)
+同事也可直接安装生成的 `.tgz`。使用旧版服务端的团队需要先升级中继。向 0.2.0 中继发布项目后，同一中继的所有在线参与者都可以提问，包括旧版名单之外的用户。公开发行的 v0.1.0 安装方式见[该版本文档](https://github.com/hdonLiu/agent-relay/blob/client-v0.1.0/README.md)。
 
 ## 本机 Docker 和分段测试
 
@@ -52,6 +55,8 @@ node scripts/e2e-local.js receive
 
 由一人运行单实例中继，双方使用同一个 HTTPS 地址。可以在服务器上沿用上面的 Docker 命令，再通过 HTTPS 反向代理将请求转至 `127.0.0.1:8787`。代理须保留路径和 `Authorization` 请求头，并为 `/v1/device-stream` 转发 WebSocket Upgrade。将下文的 `https://relay.example.com` 替换为实际地址。
 
+中继接受自助注册，已注册并在线的设备可以向这里发布的项目提问。如果团队已在接入前筛选参与者，把注册入口放在对应的受控网络或网关后面。公网开放注册时，能访问入口的其他人也能注册。
+
 <details>
 <summary>直接用 Node.js 部署中继</summary>
 
@@ -61,7 +66,7 @@ node scripts/e2e-local.js receive
 npm ci
 npm run build
 npm pack --workspace @agent-relay/server
-npm install -g ./agent-relay-server-0.1.0.tgz
+npm install -g ./agent-relay-server-0.2.0.tgz
 agent-relay-server serve --host 127.0.0.1 --port 8787
 ```
 
@@ -77,7 +82,7 @@ agent-relay-server serve --host 127.0.0.1 --port 8787
 codex mcp add peer -- "$(command -v node)" "$(command -v agent-relay)" mcp --server https://relay.example.com
 ```
 
-Alice 在 Codex 中说“用 peer 把这台电脑注册为 @alice”，Bob 注册为 `@bob`。**两人都注册后，再授权项目。** 如果已提前填过对方的名字，等对方注册后重新运行授权命令。 用户名以字母开头，支持 2–32 个英文字母、数字、下划线或连字符。没有系统凭据库时，在上述 MCP 命令末尾加 `--credential-store file`，让凭据保存在本机用户的私有目录。
+Alice 在 Codex 中说“用 peer 把这台电脑注册为 @alice”，Bob 注册为 `@bob`。各自注册成功后就可以选择收件项目。用户名以字母开头，支持 2–32 个英文字母、数字、下划线或连字符。没有系统凭据库时，在上述 MCP 命令末尾加 `--credential-store file`，让凭据保存在本机用户的私有目录。
 
 ### 各自选择收件项目
 
@@ -85,17 +90,17 @@ Alice 在 Codex 中说“用 peer 把这台电脑注册为 @alice”，Bob 注�
 
 ```sh
 agent-relay setup --server https://relay.example.com \
-  --project /path/to/alice-project --target alice/app --allow bob
+  --project /path/to/alice-project
 ```
 
 Bob 在自己的电脑上开放 `isho-service` 项目。
 
 ```sh
 agent-relay setup --server https://relay.example.com \
-  --project /path/to/isho-service --target bob/isho-service --allow alice
+  --project /path/to/isho-service
 ```
 
-`setup` 会登记项目，并在 macOS 安装 LaunchAgent、在 Linux 安装用户级 systemd 服务。若当前 Codex 会话还看不到 `peer` 工具，重新打开会话。
+`setup` 会登记项目，并在 macOS 安装 LaunchAgent、在 Linux 安装用户级 systemd 服务。项目别名默认是 `用户名/目录名`，例如 `bob/isho-service`。同一中继上的新同事注册并上线后，即可找到 Bob 发布的在线项目。若当前 Codex 会话还看不到 `peer` 工具，重新打开会话。
 
 ## 发问、回信和追问
 
@@ -104,7 +109,7 @@ Alice 可以直接在当前会话里说：“找到 @bob，问他服务端还支
 | 工具 | 何时使用 |
 | --- | --- |
 | `register_agent` | 用户主动登记自己和这台设备。 |
-| `search_peers` | 查找当前在线、且已授权自己提问的项目。例如按 `bob` 搜索。 |
+| `search_peers` | 查找同一中继上由在线设备发布的收件项目。例如按 `bob` 搜索。 |
 | `ask_peer` | 首问使用 `username` 或具体 `target`。同一用户名有多个可用项目时，选用明确的别名，如 `bob/isho-service`。追问沿用返回的 `conversation_id`。 |
 | `reply_to_peer` | 引用收到的问题消息号作答，也可用 `needs_info` 请求补充，或用 `needs_owner` 请项目所有者确认。 |
 
@@ -123,16 +128,16 @@ sequenceDiagram
     R->>B: 在同一个 B1 继续
 ```
 
-## 权限、断线与重启
+## 项目范围、断线与重启
 
 - **项目权限**。自动创建的收件会话在登记项目中只读，关闭沙箱网络和其他 MCP。问题和答案的正文会经过中继，请使用团队信任的服务。中继用会话引用路由，项目路径和完整聊天记录保存在各自电脑。
 - **设备离线**。中继检测到断线后，设备从目录移除，离线期间的调用不会补投。双方重新在线且原协作仍可用时，可主动续问。如果发送后提示“投递未确认”，先核对收件会话或消息号，再决定是否重发。
-- **中继重启**。单个中继进程把注册、授权及会话路由保存在内存中，无需数据库。重启后用户名可被重新领取；双方要重新注册、核对彼此身份、用 `setup --allow` 发布项目，然后从本地聊天发起新协作。
+- **中继重启**。单个中继进程把注册、项目及会话路由保存在内存中。重启后用户名可被重新领取。双方重新注册、用 `setup` 发布各自项目后，即可从本地聊天发起新协作。
 
 <details>
-<summary>调整联系人、指定已有会话及无人值守运行</summary>
+<summary>指定已有会话及无人值守运行</summary>
 
-- 对同一项目和别名重跑 `setup`，用一个或多个 `--allow` 替换完整授权名单，或用 `--allow ''` 清空。也可为单独的目标别名设置 `--session-id <本机线程 ID>`，让获授权的请求通过该别名进入指定会话；已有会话沿用所有者的工具和审批设置。
+- 如需接收到已有会话，可为它发布一个单独的目标别名并设置 `--session-id <本机线程 ID>`。同一中继的在线参与者可以通过指定该目标向它提问。已有会话沿用所有者的工具和审批设置。
 - 使用 `setup --manual` 时，自行运行 `agent-relay daemon`。若使用自定义 `--state-dir`，请在 MCP、setup 和 daemon 三个入口传同一个目录。只用交互式 CLI 时，可用 `codex app-server daemon start` 启动共享进程，再用 `codex --remote unix://` 接入。
 - 如需在人员离开后自动收发，项目所有者可以在自己的 Codex 配置中预先批准以下工具，重新加载配置后生效。
 
@@ -153,5 +158,5 @@ approval_mode = "approve"
 
 - [详细设计与完整时序](docs/design.md) · [下载全链路图](docs/flow.png)
 - [本机 Docker 收发 E2E 报告](docs/reports/2026-11-27-local-e2e.md)
-- [群目录设计草案](docs/group-directory.md)（后续方案，当前按项目授权）
+- [群目录历史草案](docs/group-directory.md)
 - 在仓库根目录运行 `npm test` 执行回归测试（需要 OpenSSL），运行 `npm run build` 构建客户端和服务端。在兼容的 Mac 上可用 `node scripts/smoke-codex.js` 单独检查 Codex 宿主适配器。

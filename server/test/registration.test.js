@@ -59,49 +59,67 @@ test('conflicts roll back registration and preserve an existing operator identit
   assert.equal(store.register(owner, alice).user_id, 'alice');
 });
 
-test('newly claimed names require fresh grants; restarting discards all identities, projects and grants', () => {
+test('joining after a project is published preserves it; restarting discards identities and projects', () => {
   const registry = new Registry();
   const alice = registration('alice');
   const bob = registration('bob');
   const aliceOwner = token();
   registry.register(token(), bob);
-  const project = {
-    device_id: bob.device_id, project_id: 'app', alias: 'bob/app', allowed_senders: ['@Alice'],
-  };
+  const project = { device_id: bob.device_id, project_id: 'app', alias: 'bob/app' };
   registry.putTarget('bob', 'T', project);
   const identity = registry.register(aliceOwner, alice);
-  assert.deepEqual(registry.listTargets('alice'), []);
-  assert.equal(registry.resolveTarget('alice', 'bob/app'), null);
-  registry.putTarget('bob', 'T', project);
   assert.deepEqual(registry.register(aliceOwner, alice), identity);
-  assert.equal(registry.resolveTarget('alice', 'bob/app').target_id, 'T');
+  assert.equal(registry.resolveTarget('bob/app').target_id, 'T');
+  assert.deepEqual(registry.listTargets(), [registry.resolveTarget('bob/app')]);
+  assert.throws(() => registry.putTarget('alice', 'T', { ...project, alias: 'alice/app' }), { code: 'UNAUTHORIZED' });
+  assert.throws(() => registry.putTarget('alice', 'T', {
+    ...project, device_id: alice.device_id, alias: 'alice/app',
+  }), { code: 'TARGET_UNAVAILABLE' });
 
   const restarted = new Registry();
   assert.equal(restarted.userForToken(aliceOwner), null);
   assert.equal(restarted.deviceForToken(bob.device_token, 'device'), null);
-  assert.deepEqual(restarted.listTargets('alice'), []);
-  assert.equal(restarted.canSend('alice', 'T'), false);
-  // Names can be re-claimed after a fresh boot; prior grants cannot follow them.
+  assert.deepEqual(restarted.listTargets(), []);
   restarted.register(token(), registration('alice'));
-  assert.equal(restarted.resolveTarget('alice', 'bob/app'), null);
+  assert.equal(restarted.resolveTarget('bob/app'), null);
   assert.throws(() => restarted.putTarget('bob', 'T', project), { code: 'UNAUTHORIZED' });
 });
 
-test('target aliases follow a project change while old target IDs keep their grants until withdrawn', () => {
-  const lost = [];
-  const registry = new Registry((targetId, sender) => lost.push([targetId, sender]));
+test('target aliases follow a project change while old target IDs still resolve until device revocation', () => {
+  const registry = new Registry();
   const bob = registration('bob');
   registry.register(token(), bob);
-  registry.register(token(), registration('alice'));
-  const target = { device_id: bob.device_id, project_id: 'one', alias: 'bob/project', allowed_senders: ['alice'] };
+  const target = { device_id: bob.device_id, project_id: 'one', alias: 'bob/project' };
   registry.putTarget('bob', 'original', target);
   registry.putTarget('bob', 'replacement', { ...target, project_id: 'two' });
-  assert.equal(registry.resolveTarget('alice', 'bob/project').target_id, 'replacement');
-  assert.equal(registry.resolveTarget('alice', 'original').project_id, 'one');
-  assert.deepEqual(lost, []);
-  registry.putTarget('bob', 'original', { ...target, alias: null, allowed_senders: [] });
-  assert.equal(registry.resolveTarget('alice', 'original'), null);
-  assert.deepEqual(lost, [['original', 'alice']]);
+  assert.equal(registry.resolveTarget('bob/project').target_id, 'replacement');
+  assert.equal(registry.resolveTarget('original').project_id, 'one');
   registry.revokeDevice('bob', bob.device_id);
-  assert.deepEqual(registry.listTargets('alice'), []);
+  assert.equal(registry.resolveTarget('original'), null);
+  assert.equal(registry.resolveTarget('bob/project'), null);
+  assert.deepEqual(registry.listTargets(), []);
+});
+
+test('the owner management endpoint lists only the owner’s projects and omits local session references', async t => {
+  const store = new RelayStore();
+  const relay = createRelayServer({ store });
+  t.after(async () => { await relay.close(); store.close(); });
+  const { port } = await relay.listen(0);
+  const bobOwner = token(), aliceOwner = token(), bob = registration('bob');
+  store.register(bobOwner, bob);
+  store.register(aliceOwner, registration('alice'));
+  store.putTarget('bob', 'private', {
+    device_id: bob.device_id, project_id: 'app', alias: 'bob/app', fixed_session_ref: 'local-thread',
+  });
+  async function listOwned(owner) {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/targets`, {
+      headers: { authorization: 'Bearer ' + owner },
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  }
+  assert.deepEqual(await listOwned(aliceOwner), []);
+  const targets = await listOwned(bobOwner);
+  assert.deepEqual(targets.map(target => target.target_id), ['private']);
+  assert.equal(Object.hasOwn(targets[0], 'fixed_session_ref'), false);
 });

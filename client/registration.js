@@ -135,27 +135,16 @@ async function confirmExisting(stateDir, config, secrets) {
   const changed = instance && instance !== config.relay_instance_id;
   if (response.status === 401 || response.status === 403) {
     if (!changed || !secrets.management_token) reject('DEVICE_REVOKED');
-    // Persist the grant reset before attempting to reclaim this identity. A
-    // lost HTTP response must never leave setup able to republish old grants.
-    clearGrants(config);
-    saveSettings(stateDir, config);
     const claim = await claimIdentity(config.server_url, config.user_id, config.device_id, secrets);
     config.relay_instance_id = claim.instance ?? instance;
   } else {
     if (!response.ok || data?.id !== id || typeof data.result?.protocolVersion !== 'string')
       reject('REGISTRATION_UNCONFIRMED');
-    if (changed) {
-      clearGrants(config);
-      config.relay_instance_id = instance;
-    }
+    if (changed) config.relay_instance_id = instance;
   }
   if (changed) saveSettings(stateDir, config);
   return { user_id: config.user_id, device_id: config.device_id, status: 'registered',
     ...(changed && Object.keys(config.targets ?? {}).length ? { targets_require_setup: true } : {}) };
-}
-
-function clearGrants(config) {
-  for (const target of Object.values(config.targets ?? {})) target.allowed_senders = [];
 }
 
 async function claimIdentity(origin, username, deviceId, secrets) {

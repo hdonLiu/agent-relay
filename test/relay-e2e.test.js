@@ -96,7 +96,8 @@ test(
     const devices = {};
     const program = resolve('client/index.js');
     const mcp = {};
-    for (const name of ['alice', 'bob']) {
+    // Bob publishes his project before Alice joins the relay.
+    for (const name of ['bob', 'alice']) {
       const state = join(dir, name);
       const client = new Client({ name: 'fixture-' + name, version: '1' });
       await client.connect(
@@ -119,13 +120,7 @@ test(
         (await mcp[name]('owner', 'register_agent', { username: name })).structuredContent.user_id,
         name
       );
-    }
-    for (const [name, other] of [
-      ['alice', 'bob'],
-      ['bob', 'alice'],
-    ]) {
-      const state = join(dir, name),
-        project = join(dir, name + '-project');
+      const project = join(dir, name + '-project');
       mkdirSync(project);
       await run(
         process.execPath,
@@ -141,8 +136,6 @@ test(
           project,
           '--target',
           name + '/app',
-          '--allow',
-          '@' + other.toUpperCase(),
           '--agent-bin',
           process.execPath,
         ],

@@ -311,9 +311,6 @@ try {
   } finally {
     await registration.close();
   }
-  peer = await registerPeer(origin, mockName);
-  await peer.publish(username);
-  await peer.connect();
   await run(
     process.execPath,
     [
@@ -326,8 +323,6 @@ try {
       targetDir,
       '--target',
       username + '/isho-service',
-      '--allow',
-      '@' + mockName.toUpperCase(),
       '--agent-bin',
       wrapper,
     ],
@@ -336,6 +331,9 @@ try {
   spawnScoped(binary, ['--no-daemon', 'app-server', '--listen', 'unix://' + hostSocket]);
   await until(() => stat(hostSocket).catch(() => false), 'Codex socket');
   spawnScoped(process.execPath, [clientCli, 'daemon', '--state-dir', state]);
+  peer = await registerPeer(origin, mockName);
+  await peer.publish();
+  await peer.connect();
   await until(
     async () =>
       (await peer.call('search_peers', { query: username })).peers.some((p) => p.username === username),

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -70,53 +70,9 @@ test('a fresh stdio MCP registers a username and device, then setup publishes it
   const conflict = await claim(second, 'alice');
   assert.equal(conflict.isError, true);
   assert.equal(conflict.structuredContent.code, 'USERNAME_TAKEN');
-  assert.equal((await claim(second, 'bob')).structuredContent.user_id, 'bob');
 
   const project = join(dir, 'service-project');
   mkdirSync(project);
-  await run(
-    process.execPath,
-    [
-      cli,
-      'setup',
-      '--state-dir',
-      state,
-      '--manual',
-      '--project',
-      project,
-      '--target',
-      'alice/service',
-      '--allow',
-      'bob',
-      '--agent-bin',
-      process.execPath,
-    ],
-    {
-      env: { ...process.env, AGENT_RELAY_USER_TOKEN: '' },
-    }
-  );
-  const [target] = store.listTargets('bob');
-  assert.equal(target.device_id, identity.device_id);
-  assert.equal(target.alias, 'alice/service');
-
-  // An empty replacement instance at the same address has no owners, grants or chats.
-  const oldInstance = (await (await fetch(origin + '/health')).json()).instance_id;
-  await relay.close();
-  store.close();
-  store = new RelayStore();
-  relay = createRelayServer({ store });
-  await relay.listen(port);
-  const newInstance = (await (await fetch(origin + '/health')).json()).instance_id;
-  assert.notEqual(newInstance, oldInstance);
-  assert.equal(store.userForToken(secrets.management_token), null);
-  assert.deepEqual(store.listTargets('bob'), []);
-  assert.deepEqual((await claim(reopened, 'alice')).structuredContent, {
-    ...identity,
-    targets_require_setup: true,
-  });
-  assert.equal((await claim(second, 'bob')).structuredContent.user_id, 'bob');
-  assert.deepEqual(store.listTargets('bob'), []);
-
   const publish = [
     cli,
     'setup',
@@ -132,9 +88,43 @@ test('a fresh stdio MCP registers a username and device, then setup publishes it
   ];
   const options = { env: { ...process.env, AGENT_RELAY_USER_TOKEN: '' } };
   await run(process.execPath, publish, options);
-  assert.deepEqual(store.listTargets('bob'), []);
-  await run(process.execPath, [...publish, '--allow', 'bob'], options);
-  assert.equal(store.listTargets('bob')[0].device_id, identity.device_id);
+  assert.equal((await claim(second, 'bob')).structuredContent.user_id, 'bob');
+  const [target] = store.listTargets();
+  assert.equal(target.device_id, identity.device_id);
+  assert.equal(target.alias, 'alice/service');
+
+  // Reusing a v0.1 state directory keeps the target ID when updating the same project.
+  const settingsPath = join(state, 'config.json');
+  const legacyConfig = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  legacyConfig.targets[target.target_id].allowed_senders = ['someone-else'];
+  writeFileSync(settingsPath, JSON.stringify(legacyConfig));
+  const legacySetup = await run(process.execPath, [...publish, '--allow', 'someone-else'], options);
+  assert.match(legacySetup.stderr, /--allow.*ignored/i);
+  const updated = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(Object.keys(updated.targets), [target.target_id]);
+  assert.equal(updated.targets[target.target_id].project_id, target.project_id);
+  assert.equal(Object.hasOwn(updated.targets[target.target_id], 'allowed_senders'), false);
+
+  // The replacement relay starts without devices, published projects or conversations.
+  const oldInstance = (await (await fetch(origin + '/health')).json()).instance_id;
+  await relay.close();
+  store.close();
+  store = new RelayStore();
+  relay = createRelayServer({ store });
+  await relay.listen(port);
+  const newInstance = (await (await fetch(origin + '/health')).json()).instance_id;
+  assert.notEqual(newInstance, oldInstance);
+  assert.equal(store.userForToken(secrets.management_token), null);
+  assert.deepEqual(store.listTargets(), []);
+  assert.deepEqual((await claim(reopened, 'alice')).structuredContent, {
+    ...identity,
+    targets_require_setup: true,
+  });
+  assert.equal((await claim(second, 'bob')).structuredContent.user_id, 'bob');
+  assert.deepEqual(store.listTargets(), []);
+
+  await run(process.execPath, publish, options);
+  assert.equal(store.listTargets()[0].device_id, identity.device_id);
 
   // A partially restored state must not replace the only copy of the owner credential.
   rmSync(join(state, 'config.json'));

@@ -8,7 +8,6 @@ import WebSocket from 'ws';
 import { relayOrigin } from '../client/settings.js';
 
 // The simulated host uses the same public registration, MCP and device protocols as a real peer.
-// Registration and project publication are separate so both usernames can be claimed first.
 export async function registerPeer(origin, username) {
   origin = relayOrigin(origin);
   const token = () => randomBytes(32).toString('base64url');
@@ -109,12 +108,11 @@ export async function registerPeer(origin, username) {
     username,
     frames,
     sessionFor,
-    publish(allowedUsername) {
+    publish() {
       return manage('PUT', '/v1/targets/' + targetId, {
         device_id: deviceId,
         project_id: projectId,
         alias: username + '/project',
-        allowed_senders: [allowedUsername],
       });
     },
     async connect() {

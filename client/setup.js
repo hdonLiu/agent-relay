@@ -51,6 +51,8 @@ async function request(base, path, method, token, value) {
   return data;
 }
 export async function setup(v, stateDir, entry) {
+  if (v.allow !== undefined)
+    console.error('The --allow option is ignored. Published projects are shared with members of this relay.');
   return withRegistrationLock(stateDir, () => configureProject(v, stateDir, entry));
 }
 
@@ -119,13 +121,6 @@ async function configureProject(v, stateDir, entry) {
   );
   const targetId = prior?.[0] || randomUUID();
   const projectId = prior?.[1].project_id || randomUUID();
-  const grants =
-    v.allow === undefined
-      ? prior?.[1].allowed_senders || []
-      : v.allow
-          .flatMap((s) => s.split(','))
-          .map((s) => s.trim())
-          .filter(Boolean);
   const fixed = native
     ? sessionRefFor({ stateDir, config, adapter: adapterName, nativeId: native })
     : null;
@@ -134,8 +129,6 @@ async function configureProject(v, stateDir, entry) {
     adapter: adapterName,
     project_id: projectId,
     cwd,
-    // The cloud is authoritative. Cache changed grants only once its PUT succeeds.
-    allowed_senders: prior?.[1].allowed_senders || [],
     ...(fixed ? { fixed_session_ref: fixed, native_session_id: native } : {}),
   };
   saveSettings(stateDir, config);
@@ -153,12 +146,10 @@ async function configureProject(v, stateDir, entry) {
     device_id: config.device_id,
     project_id: projectId,
     alias,
-    allowed_senders: grants,
     ...(fixed ? { fixed_session_ref: fixed } : {}),
   });
-  config.targets[targetId].allowed_senders = grants;
-  saveSettings(stateDir, config);
   console.log('Registered target ' + alias + ' (' + targetId + ') on device ' + config.device_id + '.');
+  console.log('When this device is online, other online members of this relay can ask the project.');
   if (v.manual)
     console.log(
       'Manual mode: register the peer stdio MCP entry and start agent-relay daemon using this state directory.'

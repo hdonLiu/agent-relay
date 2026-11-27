@@ -7,6 +7,7 @@ import { toolsList } from '../../protocol.js';
 import { getAdapterType } from '../adapters/index.js';
 import { registerAgent, RegistrationError } from '../registration.js';
 import { relayOrigin } from '../settings.js';
+import clientPackage from '../package.json' with { type: 'json' };
 
 const registrationTool = {
   name: 'register_agent',
@@ -81,7 +82,7 @@ export async function runMcp({
     throw new Error('Use --credential-store system or file.');
   }
   const localTools = registrationOrigin ? [...toolsList, registrationTool] : toolsList;
-  const server = new Server({ name: 'agent-relay', version: '0.1.0' }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'agent-relay', version: clientPackage.version }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: localTools }));
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     const tool = localTools.find(t => t.name === params.name);
@@ -96,7 +97,7 @@ export async function runMcp({
           stateDir, serverUrl: registrationOrigin, credentialStore, username: args.username, adapterName,
         });
         const detail = registration.targets_require_setup
-          ? ' Publish the local project again with setup and explicitly choose its allowed senders.'
+          ? ' Run setup again for each local project you want to publish.'
           : '';
         return {
           content: [{ type: 'text', text: 'Registered @' + registration.user_id + ' on this device.' + detail }],

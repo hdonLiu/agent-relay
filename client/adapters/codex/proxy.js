@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Duplex } from 'node:stream';
 import WebSocket from 'ws';
+import clientPackage from '../../package.json' with { type: 'json' };
 
 export function hostError(code, message, submission = 'unknown', retryable = false) {
   return Object.assign(new Error(message), { code, submission, retryable });
@@ -65,7 +66,7 @@ export class AppServerProxy {
       }
     });
     await this.#request(ws, 'initialize', {
-      clientInfo: { name: 'agent-relay', version: '0.1.0' }, capabilities: { experimentalApi: true },
+      clientInfo: { name: 'agent-relay', version: clientPackage.version }, capabilities: { experimentalApi: true },
     });
     ws.send(JSON.stringify({ method: 'initialized' }));
     return ws;

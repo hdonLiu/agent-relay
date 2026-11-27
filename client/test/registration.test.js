@@ -159,7 +159,7 @@ test('orphaned credentials survive reinstall; an interrupted pre-send journal ca
   assert.deepEqual(claims[1], claims[0]);
 });
 
-test('explicit registration after a relay restart reuses device proof and discards old grants, including after a lost response', async t => {
+test('explicit registration after a relay restart preserves project setup and reuses device proof after a lost response', async t => {
   let instance = 'instance-a';
   let enrolled = false, dropClaimResponse = false;
   const claims = [];
@@ -177,7 +177,7 @@ test('explicit registration after a relay restart reuses device proof and discar
   const registration = { ...options, username: 'alice' };
   await registerAgent(registration);
   const original = readSettings(options.stateDir);
-  original.targets = { project: { cwd: '/project', allowed_senders: ['bob'] } };
+  original.targets = { project: { cwd: '/project' } };
   saveSettings(options.stateDir, original);
   enrolled = false;
   await assert.rejects(registerAgent(registration), { code: 'DEVICE_REVOKED' });
@@ -187,7 +187,7 @@ test('explicit registration after a relay restart reuses device proof and discar
   instance = 'instance-b';
   dropClaimResponse = true;
   await assert.rejects(registerAgent(registration), { code: 'REGISTRATION_UNCONFIRMED' });
-  assert.deepEqual(readSettings(options.stateDir).targets.project, { cwd: '/project', allowed_senders: [] });
+  assert.deepEqual(readSettings(options.stateDir), original);
   assert.equal((await registerAgent(registration)).targets_require_setup, true);
   assert.deepEqual(claims, [claims[0], claims[0]]);
   assert.equal(readSettings(options.stateDir).relay_instance_id, instance);

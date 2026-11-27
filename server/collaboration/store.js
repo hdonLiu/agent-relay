@@ -64,11 +64,6 @@ export class RelayStore {
     this.requests = new Map();
     this.pending = new Map();
     this.registry = new Registry(
-      (targetId, sender) =>
-        this.terminate(
-          (conversation) =>
-            conversation.target.target_id === targetId && conversation.origin.user_id === sender
-        ),
       (deviceId) =>
         this.terminate(
           (conversation) =>
@@ -95,8 +90,8 @@ export class RelayStore {
   putTarget(owner, target, body) {
     return this.registry.putTarget(owner, target, body);
   }
-  listTargets(owner) {
-    return this.registry.listTargets(owner);
+  listTargets() {
+    return this.registry.listTargets();
   }
   revokeDevice(owner, device) {
     return this.registry.revokeDevice(owner, device);
@@ -105,24 +100,22 @@ export class RelayStore {
     return this.registry.deviceForToken(token, scope);
   }
 
-  sharedProjects(user) {
-    return this.registry
-      .listTargets(user)
-      .filter((target) => !target.fixed_session_ref && this.registry.canSend(user, target.target_id));
+  sharedProjects() {
+    return this.listTargets().filter((target) => !target.fixed_session_ref);
   }
 
-  targetFor(user, input, live) {
+  targetFor(input, live) {
     if (input.target) {
-      const target = this.registry.resolveTarget(user, input.target);
+      const target = this.registry.resolveTarget(input.target);
       if (!target) fail('TARGET_UNAVAILABLE', 404);
       if (!live.isOnline(target.device_id)) fail('PEER_OFFLINE', 409);
       return target;
     }
-    const allowed = this.sharedProjects(user).filter(
+    const projects = this.sharedProjects().filter(
       (target) => target.owner_id.toLowerCase() === input.username
     );
-    if (!allowed.length) fail('TARGET_UNAVAILABLE', 404);
-    const online = allowed.filter((target) => live.isOnline(target.device_id));
+    if (!projects.length) fail('TARGET_UNAVAILABLE', 404);
+    const online = projects.filter((target) => live.isOnline(target.device_id));
     if (!online.length) fail('PEER_OFFLINE', 409);
     if (online.length > 1) {
       const targets = online.map((target) => target.alias ?? target.target_id);
@@ -138,8 +131,8 @@ export class RelayStore {
       fields(args, ['query']);
       const query = args.query === undefined || args.query === '' ? '' : addressName(args.query);
       return {
-        peers: this.sharedProjects(device.user_id)
-          .filter((target) => live.isOnline(target.device_id))
+        peers: this.sharedProjects()
+          .filter((target) => target.owner_id !== device.user_id && live.isOnline(target.device_id))
           .map((target) => ({
             username: target.owner_id,
             target: target.alias ?? target.target_id,
@@ -210,7 +203,7 @@ export class RelayStore {
         if (conversation.terminal) fail(conversation.terminal, 409);
         if (!conversation.peerRef) fail('BINDING_UNCONFIRMED', 409);
       } else {
-        const target = this.targetFor(device.user_id, input, live);
+        const target = this.targetFor(input, live);
         conversation = {
           id: id(),
           origin: { user_id: device.user_id, device_id: device.device_id },
@@ -234,8 +227,6 @@ export class RelayStore {
       });
     }
     this.registry.requireDevice(device);
-    if (!this.registry.canSend(conversation.origin.user_id, conversation.target.target_id))
-      fail('ACCESS_REVOKED', 409);
     if (!live.isOnline(device.device_id)) fail('DEVICE_OFFLINE', 409);
     if (!live.isOnline(destination)) fail('PEER_OFFLINE', 409);
     this.makeRoom(conversation);

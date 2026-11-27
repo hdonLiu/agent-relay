@@ -6,6 +6,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { toolsList } from '../protocol.js';
+import serverPackage from './package.json' with { type: 'json' };
 
 const maxBody = 128 * 1024;
 function fail(status, code) {
@@ -52,7 +53,7 @@ async function handleMcp(req, res, store, device, live) {
     return json(res, 405, { error: 'METHOD_NOT_ALLOWED' });
   }
   const rpc = await body(req);
-  const mcp = new Server({ name: 'agent-relay', version: '0.1.0' }, { capabilities: { tools: {} } });
+  const mcp = new Server({ name: 'agent-relay', version: serverPackage.version }, { capabilities: { tools: {} } });
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolsList }));
   mcp.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     try {
@@ -154,7 +155,7 @@ export function createRelayServer({ store, heartbeatMs = 30_000, tls }) {
       if (path === '/v1/device-enrollments' && req.method === 'POST')
         return json(res, 201, store.enroll(owner));
       if (path === '/v1/targets' && req.method === 'GET') {
-        const owned = store.listTargets(owner).filter((target) => target.owner_id === owner);
+        const owned = store.listTargets().filter((target) => target.owner_id === owner);
         return json(
           res,
           200,

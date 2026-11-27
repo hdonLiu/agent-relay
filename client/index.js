@@ -30,7 +30,7 @@ async function main() {
   });
   if (!command || v.help) {
     console.log(
-      'agent-relay setup [--server HTTPS_ORIGIN] [--project DIR] [--adapter NAME] [--agent-bin PATH] [--target ALIAS] [--allow USER] [--session-id NATIVE_ID] [--manual] [--credential-store system|file]\nagent-relay mcp [--server HTTPS_ORIGIN] [--credential-store system|file] [--adapter codex]\nagent-relay daemon\nAll commands accept --state-dir DIR. Pass --server to mcp to enable username and device registration.'
+      'agent-relay setup [--server HTTPS_ORIGIN] [--project DIR] [--adapter NAME] [--agent-bin PATH] [--target ALIAS] [--session-id NATIVE_ID] [--manual] [--credential-store system|file]\nagent-relay mcp [--server HTTPS_ORIGIN] [--credential-store system|file] [--adapter codex]\nagent-relay daemon\nAll commands accept --state-dir DIR. Pass --server to mcp to enable username and device registration.'
     );
     return;
   }

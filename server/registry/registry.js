@@ -5,22 +5,16 @@ function validRegistrationToken(value) {
     Buffer.from(value, 'base64url').toString('base64url') === value;
 }
 
-function targetInfo(target) {
-  const { target_id, device_id, project_id, alias, owner_id, fixed_session_ref } = target;
-  return { target_id, device_id, project_id, alias, owner_id, fixed_session_ref };
-}
-
 // Each server instance owns its registry. Operations validate before changing
 // the maps and finish synchronously on the Node.js event loop.
 export class Registry {
-  constructor(onGrantRevoked = () => {}, onDeviceRevoked = () => {}) {
+  constructor(onDeviceRevoked = () => {}) {
     this.users = new Map();
     this.devices = new Map();
     this.credentials = new Map();
     this.enrollments = new Map();
     this.targets = new Map();
     this.aliases = new Map();
-    this.onGrantRevoked = onGrantRevoked;
     this.onDeviceRevoked = onDeviceRevoked;
   }
 
@@ -74,8 +68,6 @@ export class Registry {
     if (device || hashes.some(hash => this.credentials.has(hash))) fail('REGISTRATION_CONFLICT', 409);
     this.#setUser(username, ownerHash);
     this.#setDevice(username, device_id, mcpHash, deviceHash);
-    // A freshly claimed name must be explicitly authorized by the sharing owner.
-    for (const target of this.targets.values()) target.senders.delete(username);
     return result;
   }
 
@@ -133,13 +125,6 @@ export class Registry {
       fail('ALIAS_NAMESPACE_MISMATCH', 400);
     }
     const fixed = body.fixed_session_ref == null ? null : identifier(body.fixed_session_ref, 'fixed_session_ref');
-    if (!Array.isArray(body.allowed_senders) || body.allowed_senders.length > 1000) fail('INVALID_ARGUMENTS');
-    const senders = new Set(body.allowed_senders.map(value => {
-      const name = identifier(value, 'allowed sender').toLowerCase();
-      const handle = name.replace(/^@/, '');
-      // Existing operator-issued identities can have their own case or a literal @.
-      return (this.users.get(name) ?? this.users.get(handle))?.username ?? identifier(handle, 'allowed sender');
-    }));
 
     this.requireDevice({ device_id: device, user_id: owner });
     const existing = this.targets.get(targetId);
@@ -155,34 +140,22 @@ export class Registry {
     if (alias) this.aliases.set(alias, targetId);
 
     const target = { target_id: targetId, device_id: device, project_id: project, alias, owner_id: owner,
-      fixed_session_ref: fixed, senders };
+      fixed_session_ref: fixed };
     this.targets.set(targetId, target);
-    if (existing) {
-      for (const sender of existing.senders) {
-        if (!senders.has(sender)) this.onGrantRevoked(targetId, sender);
-      }
-    }
     return { target_id: targetId, device_id: device, project_id: project, alias,
-      fixed_session_ref: fixed, allowed_senders: [...senders] };
+      fixed_session_ref: fixed };
   }
 
-  canSend(username, targetId) {
-    const target = this.targets.get(targetId);
-    return Boolean(target && !this.devices.get(target.device_id).revoked && target.senders.has(username));
-  }
-
-  resolveTarget(username, address) {
+  resolveTarget(address) {
     const target = this.targets.get(address) ?? this.targets.get(this.aliases.get(address));
-    return target && this.canSend(username, target.target_id) ? targetInfo(target) : null;
+    return target && !this.devices.get(target.device_id).revoked ? { ...target } : null;
   }
 
-  listTargets(username) {
-    const visible = [];
-    for (const target of this.targets.values()) {
-      if (this.devices.get(target.device_id).revoked) continue;
-      if (target.owner_id === username || target.senders.has(username)) visible.push(targetInfo(target));
-    }
-    return visible.sort((a, b) => a.target_id.localeCompare(b.target_id));
+  listTargets() {
+    return [...this.targets.values()]
+      .filter(target => !this.devices.get(target.device_id).revoked)
+      .map(target => ({ ...target }))
+      .sort((a, b) => a.target_id.localeCompare(b.target_id));
   }
 
   revokeDevice(owner, deviceId) {

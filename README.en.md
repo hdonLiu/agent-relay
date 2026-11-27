@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | **English**
 
-Ask a teammate’s Codex a question from your current chat and get the answer back in that chat. Each person chooses which local project receives questions and who can ask.
+Ask a teammate’s Codex a question from your current chat and get the answer back in that chat. Each person registers with the same relay and chooses a local project to receive questions. When both devices are online, either person can find the other by username and ask.
 
 > “Ask @bob which API versions his `isho-service` project supports.”
 
@@ -10,14 +10,17 @@ Bob’s Codex opens a chat in that project and sends its answer back to yours. A
 
 ## Install the client
 
-On macOS or Linux with Node.js 24.5+ and npm, run this from any directory to install the `agent-relay` CLI from the public release.
+These instructions cover the 0.2.0 source tree. On macOS or Linux with Node.js 24.5+ and npm, build the client from the root of this checkout and install it.
 
 ```sh
-npm install -g https://github.com/hdonLiu/agent-relay/releases/latest/download/agent-relay-client.tgz
+npm ci
+npm run build
+npm pack --workspace @agent-relay/client
+npm install -g ./agent-relay-client-0.2.0.tgz
 agent-relay --help
 ```
 
-If your team runs a relay, [register with it in Codex](#register-with-the-relay-in-codex). To pin a version, use the download URL of `agent-relay-client.tgz` from that specific release in the same install command. [Client releases](https://github.com/hdonLiu/agent-relay/releases)
+Teammates can also install the resulting `.tgz` directly. Teams running an older server must upgrade the relay first. A project published on a 0.2.0 relay can receive questions from any online participant on that relay, including users outside a previous sender list. For the public v0.1.0 release, follow the [v0.1.0 instructions](https://github.com/hdonLiu/agent-relay/blob/client-v0.1.0/README.en.md).
 
 ## Try it on one Mac
 
@@ -50,6 +53,8 @@ Each test runs a separate Codex instance with scripted local model responses and
 
 Run the Docker build and start commands above on your relay host. For access from other computers, put the relay behind an HTTPS reverse proxy on the same host. Forward requests to `127.0.0.1:8787`, preserve request paths and the `Authorization` header, and enable WebSocket upgrades on `/v1/device-stream`. Each connector opens an outbound WebSocket and shares it across its chats. Use a relay you trust with the text of questions and answers.
 
+The relay accepts self-registration. A registered, online device can ask questions of projects published on that relay. If your team screens participants before they join, put registration behind the network or gateway where that screening applies. A publicly reachable registration endpoint lets other people register too.
+
 <details>
 <summary>Run the server directly with Node.js</summary>
 
@@ -59,7 +64,7 @@ From the repository root, build and install the server package, then start it be
 npm ci
 npm run build
 npm pack --workspace @agent-relay/server
-npm install -g ./agent-relay-server-0.1.0.tgz
+npm install -g ./agent-relay-server-0.2.0.tgz
 agent-relay-server serve --host 127.0.0.1 --port 8787
 ```
 
@@ -75,25 +80,25 @@ After installing the client and signing in to Codex, each person adds the local 
 codex mcp add peer -- "$(command -v node)" "$(command -v agent-relay)" mcp --server https://relay.example.com
 ```
 
-In Codex, Alice says **“Use peer to register this computer as @alice.”** Bob does the same with **@bob**. Once both names are registered, publish the projects and grant access. If you granted a name access before it was registered, rerun setup after registration. Replace the paths below with existing local project directories.
+In Codex, Alice says **“Use peer to register this computer as @alice.”** Bob does the same with **@bob**. Each person can choose their receiving project as soon as their own registration succeeds. Replace the paths below with existing local project directories.
 
 ### Choose the projects that receive questions
 
-Alice shares her application project with Bob.
+Alice publishes her application project on the relay.
 
 ```sh
 agent-relay setup --server https://relay.example.com \
-  --project /path/to/alice-project --target alice/app --allow bob
+  --project /path/to/alice-project
 ```
 
-Bob shares his `isho-service` project with Alice.
+Bob publishes his `isho-service` project.
 
 ```sh
 agent-relay setup --server https://relay.example.com \
-  --project /path/to/isho-service --target bob/isho-service --allow alice
+  --project /path/to/isho-service
 ```
 
-Setup starts the connector as a macOS LaunchAgent or a Linux systemd user service. In a CLI-only setup, start the shared Codex host with `codex app-server daemon start` and open your chat with `codex --remote unix://`. If a chat was already open when you added the MCP server, reopen it to load the tools.
+Setup starts the connector as a macOS LaunchAgent or a Linux systemd user service. The default project alias is `username/directory-name`, such as `bob/isho-service`. A teammate who registers later can find Bob’s published project as soon as both devices are online. In a CLI-only setup, start the shared Codex host with `codex app-server daemon start` and open your chat with `codex --remote unix://`. If a chat was already open when you added the MCP server, reopen it to load the tools.
 
 ## Ask and follow up
 
@@ -102,7 +107,7 @@ In Alice’s chat, try **“Find @bob and ask which API versions are supported.�
 | MCP tool | How Codex uses it |
 | --- | --- |
 | `register_agent` | Register the local username and device through MCP. |
-| `search_peers` | Find online projects that have granted the caller access. |
+| `search_peers` | Find receiving projects published by online devices on this relay. |
 | `ask_peer` | Start with a `username` or `target`. Send follow-ups with the returned `conversation_id`. |
 | `reply_to_peer` | Reference the incoming question’s `message_id` in `in_reply_to` and return `answered`, `needs_info`, or `needs_owner`. |
 
@@ -121,16 +126,16 @@ sequenceDiagram
 
 ## Permissions and availability
 
-- **Project access.** New recipient chats run with read-only access to the selected project and Codex’s minimal runtime paths. Sandbox networking is disabled and only the `peer` MCP server is enabled. To share an existing chat, publish a separate target alias with `--session-id <thread-id>` and address that alias explicitly. The existing chat keeps its owner’s permissions.
+- **Project access.** New recipient chats run with read-only access to the selected project and Codex’s minimal runtime paths. Sandbox networking is disabled and only the `peer` MCP server is enabled. To share an existing chat, publish a separate target alias with `--session-id <thread-id>`. Online participants on this relay can address that target explicitly. The existing chat keeps its owner’s permissions.
 - **Delivery.** `accepted` means the recipient’s Codex has queued the input. If a device goes offline, its projects disappear from discovery and failed sends are not replayed. Once both devices reconnect, you can continue the conversation while the relay still has its routing record. For `DELIVERY_UNCONFIRMED`, check the receiving chat before sending again.
-- **Relay restarts.** The relay runs as a single process and keeps registrations, permissions and conversation routes in memory. No database is required. After a restart, usernames can be claimed again. Each person registers, verifies the other username, and republishes the project with `setup --allow` before starting a new exchange. Previous chats remain in each person’s Codex.
+- **Relay restarts.** The relay runs as a single process and keeps registrations, projects and conversation routes in memory. After a restart, usernames can be claimed again. Each person registers and republishes their project with `setup` before starting a new exchange. Previous chats remain in each person’s Codex.
 
 <details>
-<summary>Credentials, access changes and unattended use</summary>
+<summary>Credentials and unattended use</summary>
 
 Usernames start with a letter and accept 2–32 ASCII letters, digits, underscores or hyphens. Credentials stay in macOS Keychain or Linux Secret Service (`secret-tool`). Linux also requires `flock` from util-linux. To explicitly store credentials in private local files, add `--credential-store file` to the `agent-relay mcp` command when first registering.
 
-Rerun setup for the same project and alias to change its allowed senders. The `--allow` values form the full replacement list. Use `--allow ''` to clear it. With `setup --manual`, run the connector yourself with `agent-relay daemon`. If you choose a custom `--state-dir`, use it for MCP, setup and the daemon.
+With `setup --manual`, run the connector yourself with `agent-relay daemon`. If you choose a custom `--state-dir`, use it for MCP, setup and the daemon.
 
 For unattended exchanges, keep both devices and their local Codex hosts online. Each owner can preapprove the following tools in their Codex configuration and reload it.
 
@@ -151,5 +156,5 @@ approval_mode = "approve"
 
 - [Architecture, transport and session routing (Chinese)](docs/design.md) · [Full sequence diagram (Chinese)](docs/flow.png)
 - [Local Docker E2E report, including a live model run (Chinese)](docs/reports/2026-11-27-local-e2e.md)
-- [Proposed group directory and invitations (Chinese)](docs/group-directory.md)
+- [Archived group directory proposal (Chinese)](docs/group-directory.md)
 - Run `npm test` for the regression suite (requires OpenSSL), `npm run build` to build both packages, or `node scripts/smoke-codex.js` on a compatible Mac to check the Codex adapter.
